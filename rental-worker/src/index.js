@@ -79,10 +79,14 @@ function makeServer(env) {
   }, async ({ action, include_demo, limit = 5, listing_id, phone: p, include_previously_discussed, ...c }) => {
     if (action === 'details') return { listing: await getListing(env, listing_id) };
     if (action === 'check_new') return { report: await runAlerts(env) };
-    const r = await findListings(env, c, { includeDemo: !!include_demo });
+    const query = `${c.bhk ? c.bhk + ' BHK ' : ''}apartment for rent ${c.locality || 'Bengaluru'} Bengaluru property owner contact`;
+    const [r, fc, pa] = await Promise.all([
+      findListings(env, c, { includeDemo: !!include_demo, includeShowcase: true }),
+      firecrawlSearch(env, query, 3), parallelSearch(env, query),
+    ]);
     const seen = p ? await previouslyDiscussed(env, normPhone(p), r.results.map(x => x.id)) : new Set();
-    const candidates = include_previously_discussed ? r.results : r.results.filter(x => !seen.has(x.id));
-    return { total_on_portal: r.total_on_portal, warning: r.warning, previously_discussed_excluded: include_previously_discussed ? 0 : seen.size, results: candidates.slice(0, limit).map(({ lat, lon, image, amenities, street, updated, ...x }) => ({ ...x, previously_discussed: seen.has(x.id) })) };
+    const candidates = include_previously_discussed ? r.results : r.results.filter(x => x.is_showcase || !seen.has(x.id));
+    return { total_on_portal: r.total_on_portal, warning: r.warning, previously_discussed_excluded: include_previously_discussed ? 0 : seen.size, results: candidates.slice(0, limit).map(({ lat, lon, image, street, updated, ...x }) => ({ ...x, previously_discussed: seen.has(x.id) })), web_candidates: [...fc, ...pa].filter(x => x.url).slice(0,6), web_notice: 'Web search results are leads, not confirmed listings or owner contacts. Do not infer a phone number from a generic search snippet.' };
   });
 
   // ---------------------------------------------------------------- research
@@ -112,7 +116,9 @@ function makeServer(env) {
     visit_id: z.number().int().optional(), text: z.string().max(200).optional(),
   }, async ({ action, visit_id, text, ...a }) => {
     if (action === 'schedule') {
-      if (!a.phone || !a.listing_id || !a.owner_phone || !a.requested_time) return { error: 'schedule needs phone, listing_id, owner_phone and requested_time' };
+      if (!a.phone || !a.listing_id || !a.requested_time) return { error: 'schedule needs phone, listing_id and requested_time' };
+      if (!a.owner_phone && a.listing_id.startsWith('MC-SHOWCASE-')) { a.owner_phone = env.DEMO_OWNER_PHONE; a.owner_name ||= 'Rishi D V'; }
+      if (!a.owner_phone) return { error: 'No owner contact is available for this listing.' };
       return scheduleVisit(env, a);
     }
     if (!visit_id) return { error: 'visit_id required' };
