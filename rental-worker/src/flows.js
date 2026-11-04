@@ -82,6 +82,9 @@ export async function callTenant(env, { phone, purpose, details = {}, visit_id =
 export async function applyOwnerResponse(env, visitId, outcome, text, proposed_time = null, { notifyTenant = true } = {}) {
   const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
   if (!v) return { error: 'visit not found' };
+  if (outcome === 'reschedule' && (!proposed_time || isNaN(new Date(proposed_time)))) {
+    return { error: 'A valid proposed_time is required for a reschedule; do not present the original time as the owner\'s proposal.' };
+  }
   const status = { yes: 'confirmed', no: 'declined', reschedule: 'owner_proposed_time', other: 'needs_attention' }[outcome] || outcome;
   let newTime = null;
   if (proposed_time && !isNaN(new Date(proposed_time))) newTime = new Date(proposed_time).toISOString();
