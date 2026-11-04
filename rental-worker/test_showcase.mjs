@@ -13,10 +13,19 @@ for (const area of ['Whitefield', 'Koramangala']) {
   assert.equal(d.owner_name, 'Rishi D V');
   assert.ok(d.note.includes('Fictional'));
   assert.ok(!JSON.stringify(d).includes('9900000003'));
-  const result = await findListings(env, { locality: area, bhk: 1, max_rent: 10000 }, { includeShowcase: true });
-  assert.equal(result.results[0].id, d.id);
-  assert.ok(result.results[0].mismatches.length > 0);
-  assert.equal(saved.get(d.id).locality, area);
+  const criteria = { locality: area, bhk: 1, max_rent: 10000, max_deposit: 40000, amenities: ['gym', 'garden'], furnishing: 'full', move_in_date: '2026-12-01', pets: true };
+  const result = await findListings(env, criteria, { includeShowcase: true });
+  const listing = result.results[0];
+  assert.equal(listing.title, 'MergeConflicts Garden Residences');
+  assert.equal(listing.bhk, 1);
+  assert.ok(listing.rent <= criteria.max_rent && listing.deposit <= criteria.max_deposit);
+  assert.equal(listing.furnishing, 'full');
+  assert.equal(listing.available_from, criteria.move_in_date);
+  assert.equal(listing.pets_allowed, true);
+  assert.ok(listing.amenities.includes('garden'));
+  assert.deepEqual(listing.mismatches, []);
+  assert.notEqual(listing.id, d.id);
+  assert.equal(saved.get(listing.id).locality, area);
 }
 const alert = await findListings(env, { locality: 'Whitefield' });
 assert.equal(alert.results.some(x => x.is_showcase), false);

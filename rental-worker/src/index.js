@@ -74,7 +74,7 @@ function makeServer(env) {
     action: z.enum(['search', 'details', 'check_new']).optional(),
     locality: opt, bhk: z.number().int().min(1).max(5).optional(), max_rent: z.number().int().positive().optional(),
     max_deposit: z.number().int().positive().optional(), amenities: z.array(z.string().max(30)).max(8).optional(),
-    furnishing: z.enum(['none', 'semi', 'full']).optional(), include_demo: z.boolean().optional(),
+    furnishing: z.enum(['none', 'semi', 'full']).optional(), property_type: z.string().max(40).optional(), move_in_date: z.string().max(40).optional(), pets: z.boolean().optional(), requested_preferences: z.string().max(500).optional(), include_demo: z.boolean().optional(),
     limit: z.number().int().min(1).max(10).optional(), listing_id: z.string().max(60).optional(), phone: z.string().max(20).optional(), include_previously_discussed: z.boolean().optional(),
   }, async ({ action, include_demo, limit = 5, listing_id, phone: p, include_previously_discussed, ...c }) => {
     if (action === 'details') return { listing: await getListing(env, listing_id) };

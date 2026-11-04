@@ -10,10 +10,16 @@ export const DEMO = [
 ].map(x => ({ ...x, source: 'demo', url: null, verified: false, note: 'Fictional demo listing; not real or bookable.' }));
 
 // The showcase is synthetic, not a real Prestige property. Keep its contact in a Worker secret.
-export function showcaseListing(locality) {
-  const area = (locality || 'Bengaluru').trim().slice(0, 60);
-  const slug = area.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'bengaluru';
-  return { id: `MC-SHOWCASE-${slug}`, source: 'demo', is_showcase: true, title: 'Fictional Prestige-style demo apartment', locality: area, bhk: 2, rent: 45000, deposit: 180000, furnishing: 'semi', size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, features: 'Balcony, lift, gym, pool and covered parking', owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property; locality is adapted to the search. No real property or Prestige affiliation is implied.' };
+export function showcaseListing(criteria = {}) {
+  const c = typeof criteria === 'string' ? { locality: criteria } : criteria;
+  const area = (c.locality || 'Bengaluru').trim().slice(0, 60);
+  const slug = area.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'bengaluru';
+  const selected = { bhk: c.bhk || 2, max_rent: c.max_rent || null, max_deposit: c.max_deposit || null, furnishing: c.furnishing || null, amenities: [...(c.amenities || [])].sort(), property_type: c.property_type || null, move_in_date: c.move_in_date || null, pets: c.pets ?? null, requested_preferences: c.requested_preferences || null };
+  // Different simulated configurations must not overwrite one another in the shared cache.
+  let hash = 2166136261;
+  for (const ch of JSON.stringify(selected)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
+  const amenities = [...new Set(['Balcony', 'lift', 'gym', 'swimming pool', 'covered parking', ...selected.amenities])];
+  return { id: `MC-SHOWCASE-${slug}-${(hash >>> 0).toString(36)}`, source: 'demo', is_showcase: true, title: 'MergeConflicts Garden Residences', locality: area, bhk: selected.bhk, rent: Math.min(45000, selected.max_rent || 45000), deposit: Math.min(180000, selected.max_deposit || 180000), furnishing: selected.furnishing || 'semi', property_type: selected.property_type || 'apartment', available_from: selected.move_in_date, pets_allowed: selected.pets, size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, amenities, features: amenities.join(', '), demo_requested_preferences: selected.requested_preferences, owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property. Its details are generated from the search preferences and do not describe a real property.' };
 }
 
 const fur = f => ({ Full: 'full', Semi: 'semi', None: 'none' }[f] ?? (f ? String(f).toLowerCase() : null));
@@ -72,7 +78,7 @@ export async function findListings(env, c, { includeDemo = false, includeShowcas
   const nb = await searchNoBroker(env, c);
   let list = nb.results;
   if (includeDemo) list = list.concat(DEMO.filter(d => !c.locality || d.locality.toLowerCase().includes(c.locality.toLowerCase())));
-  if (includeShowcase) list = list.concat([showcaseListing(c.locality)]);
+  if (includeShowcase) list = list.concat([showcaseListing(c)]);
   await cacheListings(env, list);
   const want = c.locality?.toLowerCase();
   const ranked = list
