@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "mergeconflicts-rentals-mcp" generated at 2026-11-03T17:14:17.790Z.

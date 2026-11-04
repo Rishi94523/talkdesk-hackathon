@@ -1,0 +1,8 @@
+{
+  "name": "mergeconflicts-rentals-mcp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "d1_databases": [{"binding":"DB","database_name":"mergeconflicts-rentals-demo","database_id":"8d31ce9d-8a67-4a7d-a1ca-1c9ec1ffa09f"}]
+}
