@@ -38,9 +38,12 @@ async function startFlow(env, flowId, args) {
 export async function placeCall(env, { kind, to, tenant_phone = null, owner_phone = null, visit_id = null, alert_id = null, purpose, briefing = {} }) {
   const flowId = env[FLOW_ENV[kind]];
   const ready = !!(flowId && env.TALKDESK_CLIENT_ID);
+  // Deferred calls let the current conversation end first (the demo tenant and owner share one phone).
+  const defer = ready && callDelaySeconds(env) > 0;
   const ins = await env.DB.prepare('INSERT INTO outreach(kind,to_phone,tenant_phone,owner_phone,visit_id,alert_id,purpose,briefing,status) VALUES(?,?,?,?,?,?,?,?,?)')
-    .bind(kind, to, tenant_phone, owner_phone, visit_id, alert_id, purpose, JSON.stringify(briefing), ready ? 'initiating' : 'dry_run').run();
+    .bind(kind, to, tenant_phone, owner_phone, visit_id, alert_id, purpose, JSON.stringify(briefing), !ready ? 'dry_run' : defer ? 'queued' : 'initiating').run();
   const id = ins.meta.last_row_id;
+  if (defer) return { outreach_id: id, kind, to, status: 'queued', note: `The call will be placed about ${callDelaySeconds(env)}-${callDelaySeconds(env) + 60} seconds after this request, once the current call has ended.` };
   let status = 'dry_run', interaction_id = null, error = null;
   if (ready) {
     try {
@@ -50,6 +53,32 @@ export async function placeCall(env, { kind, to, tenant_phone = null, owner_phon
   }
   await env.DB.prepare("UPDATE outreach SET status=CASE WHEN status IN ('in_progress','completed') AND ?='dialing' THEN status ELSE ? END, interaction_id=?, error=? WHERE id=?").bind(status, status, interaction_id, error, id).run();
   return { outreach_id: id, kind, to, status, ...(error ? { error } : {}), ...(status === 'dry_run' ? { note: `Talkdesk flow for ${kind} not configured (${FLOW_ENV[kind]}); call recorded, not placed.` } : {}) };
+}
+
+export const callDelaySeconds = env => Math.max(0, +(env.CALL_DELAY_SECONDS ?? 60) || 0);
+export const callStarted = call => ['dialing', 'queued'].includes(call?.status);
+
+// Cron: start queued calls whose delay has elapsed. Each row is claimed atomically so a call is started at most once.
+export async function dispatchQueued(env) {
+  const rows = (await env.DB.prepare("SELECT * FROM outreach WHERE status='queued' AND created_at <= datetime('now', ?) ORDER BY id LIMIT 5").bind(`-${callDelaySeconds(env)} seconds`).all()).results;
+  const out = [];
+  for (const o of rows) {
+    const claim = await env.DB.prepare("UPDATE outreach SET status='initiating' WHERE id=? AND status='queued'").bind(o.id).run();
+    if (!claim.meta.changes) continue;
+    const flowId = env[FLOW_ENV[o.kind]];
+    let status = 'failed', interaction_id = null, error = null;
+    if (!flowId || !env.TALKDESK_CLIENT_ID) error = `Flow for ${o.kind} is no longer configured.`;
+    else {
+      try {
+        const briefing = j(o.briefing);
+        const res = await startFlow(env, flowId, { to_number: o.to_phone, tenant_number: o.tenant_phone, owner_number: o.owner_phone, outreach_id: o.id, intro: briefing.spoken_intro || o.purpose });
+        status = res.ok ? 'dialing' : 'failed'; interaction_id = res.id || null; error = res.error || null;
+      } catch (e) { error = e.message; }
+    }
+    await env.DB.prepare("UPDATE outreach SET status=CASE WHEN status IN ('in_progress','completed') AND ?='dialing' THEN status ELSE ? END, interaction_id=?, error=? WHERE id=?").bind(status, status, interaction_id, error, o.id).run();
+    out.push({ outreach_id: o.id, kind: o.kind, status, ...(error ? { error } : {}) });
+  }
+  return out;
 }
 
 export async function getOutreach(env, { outreach_id, phone, kind, interaction_id }) {

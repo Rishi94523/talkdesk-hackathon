@@ -3,7 +3,7 @@ import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 import { reply, fail, normPhone, j } from './util.js';
 import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES } from './sources.js';
-import { getOutreach } from './notify.js';
+import { getOutreach, dispatchQueued } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
 import { registerLegacy } from './legacy.js';
 import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits, startOwnerDiscussion, recordOwnerDiscussion } from './flows.js';
@@ -194,7 +194,9 @@ export default {
     if (url.pathname !== '/mcp') return new Response('Not found', { status: 404 });
     return createMcpHandler(() => makeServer(env))(request, env, ctx);
   },
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil((async () => { await runAlerts(env); await escalateVisits(env); })());
+  async scheduled(event, env, ctx) {
+    // Runs every minute so queued calls start promptly; alerts and escalation keep their 10-minute cadence.
+    const tenMinute = new Date(event.scheduledTime || Date.now()).getUTCMinutes() % 10 === 0;
+    ctx.waitUntil((async () => { await dispatchQueued(env); if (tenMinute) { await runAlerts(env); await escalateVisits(env); } })());
   },
 };

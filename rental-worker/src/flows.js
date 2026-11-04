@@ -1,4 +1,4 @@
-import { placeCall } from './notify.js';
+import { placeCall, callStarted } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
 import { j, normPhone } from './util.js';
 import { getMemory, recordProperty } from './memory.js';
@@ -40,7 +40,8 @@ export async function scheduleVisit(env, a) {
   const call = await callOwner(callEnv, id, mode);
   return {
     visit_id: id, status: 'pending', call,
-    strategy: call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.'
+    strategy: call.status === 'queued' ? `The request is saved. The owner will be called about ${fmtTime(when)} shortly after this call ends; tell the tenant to hang up and that they will get a call back with the owner's answer. Do not say the visit is confirmed.`
+      : call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.'
       : `The owner call was initiated to discuss ${fmtTime(when)}. An answered call and a confirmed appointment are separate outcomes.`,
   };
 }
@@ -81,7 +82,7 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
     proposed_move_in_date: move_in_date || null, tenant_instructions: notes || null,
     instruction: 'Discuss only the authorized terms; record the owner response. Do not claim acceptance without explicit agreement or transfer the call to the tenant.',
   } });
-  return { status: call.status === 'dialing' ? 'outreach_initiated' : 'outreach_not_started', call };
+  return { status: callStarted(call) ? 'outreach_initiated' : 'outreach_not_started', call };
 }
 
 export async function recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit }) {
@@ -236,7 +237,7 @@ export async function runAlerts(env) {
     if (!env.TD_FLOW_TENANT_AI || !env.TALKDESK_CLIENT_ID) { report.push({ alert: al.id, error: 'Tenant callback flow is not configured; no call placed.' }); continue; }
     const top = fresh.slice(0, 3).map(({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }) => ({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }));
     const call = await callTenant(env, { phone: al.phone, alert_id: al.id, purpose: `New listing alert: ${fresh.length} new match${fresh.length > 1 ? 'es' : ''} for the tenant's saved search.`, details: { new_listings: top, criteria: c, next: 'Walk through the listings one by one, ask which they like, offer to add to wishlist, research the area, or schedule a visit. Ask if their preferences changed.' } });
-    if (call.status === 'dialing') await env.DB.batch(top.map(l => env.DB.prepare('INSERT OR IGNORE INTO alert_seen(alert_id,listing_id) VALUES(?,?)').bind(al.id, l.id)));
+    if (callStarted(call)) await env.DB.batch(top.map(l => env.DB.prepare('INSERT OR IGNORE INTO alert_seen(alert_id,listing_id) VALUES(?,?)').bind(al.id, l.id)));
     report.push({ alert: al.id, new: fresh.length, call });
   }
   return report;
