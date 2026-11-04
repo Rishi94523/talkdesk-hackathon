@@ -51,7 +51,7 @@ function ownerBriefing(v, listing, prof) {
     listing: listing ? { id: listing.id, title: listing.title, locality: listing.locality, rent: listing.rent, deposit: listing.deposit, url: listing.url } : null,
     visit_id: v.id, requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
     spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing.`,
-    when_done: 'Call record_owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. If the owner wants to talk to the tenant directly, call request_direct_connect then end the conversation with the transfer exit.',
+    when_done: 'Call owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. If the owner wants to talk to the tenant directly, call call_context action=connect_tenant, tell the owner you are connecting them, then end with the transfer exit.',
   };
 }
 
@@ -70,8 +70,8 @@ export async function callTenant(env, { phone, purpose, details = {}, visit_id =
       role: 'You are calling the TENANT (your client) back. This is a two-way conversation, not an announcement.',
       purpose, ...details, tenant_profile: prof,
       spoken_intro: `Hi${prof?.name ? ' ' + prof.name : ''}, this is your rental assistant calling with an update.`,
-      you_can: ['Describe the listings or update and answer questions', 'add_to_wishlist', 'schedule_visit (ask for preferred time and AI-call vs direct connect)', 'save_tenant_profile with changed preferences', 'research_locality / negotiation_brief on request', 'cancel_listing_alert if they want no more calls'],
-      when_done: 'Call complete_outreach with a short summary.',
+      you_can: ['Describe the listings or update and answer questions', 'tenant action=wishlist_add', 'visits action=schedule (ask preferred time and ai_call vs direct_connect) or accept_owner_time', 'tenant action=save_preferences if preferences changed', 'research action=locality / negotiate on request', 'tenant action=alert_cancel if they want no more calls'],
+      when_done: 'Call call_context action=complete with a short summary.',
     },
   });
 }
@@ -93,7 +93,7 @@ export async function applyOwnerResponse(env, visitId, outcome, text, proposed_t
     : status === 'owner_proposed_time' ? `The owner proposed ${when} instead for the ${place}; ask the tenant if that works.`
     : `The owner said something about the ${place} that needs the tenant's input: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
-  const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Offer a property dossier / negotiation tips before the visit.' : 'Ask for a new time (or accept the proposed one) and call schedule_visit or confirm_proposed_time.' } }) : null;
+  const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Offer a property dossier / negotiation tips before the visit.' : 'Ask for a new time (or accept the proposed one): visits action=schedule or accept_owner_time.' } }) : null;
   return { visit_id: visitId, status, update, tenant_call };
 }
 

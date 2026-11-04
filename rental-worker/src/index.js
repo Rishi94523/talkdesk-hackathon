@@ -2,117 +2,186 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 import { reply, fail, normPhone, j } from './util.js';
-import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES, DEMO } from './sources.js';
-import { placeCall, getOutreach } from './notify.js';
+import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES } from './sources.js';
+import { getOutreach } from './notify.js';
 import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits } from './flows.js';
 
-const phone = z.string().min(8).max(20).describe('Tenant phone number (caller ID), e.g. +919876543210');
-const criteria = {
-  locality: z.string().max(100).optional().describe('Bengaluru locality, e.g. Whitefield'),
-  bhk: z.number().int().min(1).max(5).optional(),
-  max_rent: z.number().int().positive().optional().describe('Monthly budget in INR'),
-  max_deposit: z.number().int().positive().optional().describe('Max security deposit in INR'),
-  amenities: z.array(z.string().max(30)).max(8).optional().describe('e.g. parking, gym, pool, lift'),
-  furnishing: z.enum(['none', 'semi', 'full']).optional(),
-};
+// Talkdesk orchestrations allow 5 skills and each MCP skill binds ONE tool, so the server exposes a few
+// multi-action tools. Each Talkdesk agent picks the subset it needs:
+//   Concierge (inbound):      tenant, listings, research, visits, deal
+//   Owner liaison (outbound): call_context, owner_response, listings
+//   Tenant callback (outbound): call_context, tenant, listings, visits, research
+const nowIst = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' });
+const opt = z.string().max(100).optional();
 
 function makeServer(env) {
-  const s = new McpServer({ name: 'MergeConflicts Rentals', version: '1.0.0' });
-  const tool = (name, description, shape, fn) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => { try { return reply(await fn(a)); } catch (e) { return fail('Tool failed: ' + (e.message || 'unknown').slice(0, 200)); } });
-
-  // ---- Intake agent tools ----
-  tool('get_current_time', 'Current date/time in India (IST). Call before computing visit times.', {}, async () => ({ now_ist: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' }), now_iso: new Date().toISOString() }));
-  tool('save_tenant_profile', 'Store/merge the tenant\'s details and preferences (budget, deposit limit, BHK, localities, amenities). Call as soon as you learn something new.', { phone, name: z.string().max(80).optional(), calls_ok: z.boolean().optional().describe('Tenant agreed to receive outbound calls from the assistant'), ...criteria, move_in_date: z.string().max(40).optional(), pets: z.boolean().optional(), notes: z.string().max(500).optional() },
-    async ({ phone: p, name, calls_ok, ...prefs }) => ({ profile: await saveProfile(env, normPhone(p), name, prefs, calls_ok) }));
-  tool('get_tenant_profile', 'Fetch the saved profile, wishlist, visits and deals for a returning caller.', { phone }, async ({ phone: p }) => {
-    const n = normPhone(p);
-    const [wl, vs, ds] = await Promise.all(['SELECT listing_id,note FROM wishlist WHERE phone=?', 'SELECT id,listing_id,requested_time,status FROM visits WHERE phone=? ORDER BY id DESC LIMIT 10', 'SELECT listing_id,stage,terms FROM deals WHERE phone=?'].map(q => env.DB.prepare(q).bind(n).all()));
-    return { profile: await getProfile(env, n), wishlist: wl.results, visits: vs.results, deals: ds.results.map(d => ({ ...d, terms: j(d.terms) })) };
+  const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
+  const tool = (name, description, shape, fn) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
+    try { return reply(await fn(a)); } catch (e) { return fail('Tool failed: ' + (e.message || 'unknown').slice(0, 200)); }
   });
 
-  // ---- Listing search agent tools ----
-  tool('search_listings', 'Search live rental listings (NoBroker via API.SH) ranked against the tenant\'s preferences. Returns listing ids to use in other tools. Owner contacts are not included by the source.', { ...criteria, include_demo: z.boolean().default(false).describe('Also include fictional demo listings (for demos only)'), limit: z.number().int().min(1).max(15).default(6) },
-    async ({ include_demo, limit, ...c }) => { const r = await findListings(env, c, { includeDemo: include_demo }); return { total_on_portal: r.total_on_portal, warning: r.warning, results: r.results.slice(0, limit).map(({ lat, lon, image, amenities, ...x }) => x) }; });
-  tool('get_listing', 'Full details of one listing by id (from search_listings).', { listing_id: z.string().max(60) }, async ({ listing_id }) => ({ listing: await getListing(env, listing_id) }));
-  tool('add_to_wishlist', 'Add a listing to the tenant\'s wishlist/shortlist.', { phone, listing_id: z.string().max(60), note: z.string().max(200).optional() }, async ({ phone: p, listing_id, note }) => {
-    if (!(await getListing(env, listing_id))) return { error: 'Unknown listing_id' };
+  // ---------------------------------------------------------------- tenant
+  tool('tenant', `Tenant memory. Actions:
+- get: profile, wishlist, visits, deals and alerts for a caller (also returns current IST time). Call at the start of every conversation with the caller's phone (Caller ID).
+- save_preferences: store/merge name and preferences (locality, bhk, max_rent, max_deposit, amenities, furnishing, move_in_date, pets, notes).
+- wishlist_add (listing_id, note) / wishlist_list.
+- alert_create: watch for NEW listings matching the saved/passed criteria; on new matches our AI agent phones the tenant for a two-way conversation. Requires consent=true.
+- alert_list / alert_cancel (alert_id).`, {
+    action: z.enum(['get', 'save_preferences', 'wishlist_add', 'wishlist_list', 'alert_create', 'alert_list', 'alert_cancel']),
+    phone: z.string().min(8).max(20).describe('Tenant phone number (Caller ID)'),
+    name: z.string().max(80).optional(), locality: opt, bhk: z.number().int().min(1).max(5).optional(),
+    max_rent: z.number().int().positive().optional(), max_deposit: z.number().int().positive().optional(),
+    amenities: z.array(z.string().max(30)).max(8).optional(), furnishing: z.enum(['none', 'semi', 'full']).optional(),
+    move_in_date: opt, pets: z.boolean().optional(), notes: z.string().max(500).optional(),
+    listing_id: z.string().max(60).optional(), note: z.string().max(200).optional(),
+    alert_id: z.number().int().optional(), consent: z.boolean().optional(),
+  }, async ({ action, phone: p, listing_id, note, alert_id, consent, name, ...prefs }) => {
     const n = normPhone(p);
-    await env.DB.prepare('INSERT INTO wishlist(phone,listing_id,note) VALUES(?,?,?) ON CONFLICT(phone,listing_id) DO UPDATE SET note=excluded.note').bind(n, listing_id, note ?? null).run();
-    await updateDeal(env, n, listing_id, null, {});
+    if (action === 'get') {
+      const q = sql => env.DB.prepare(sql).bind(n).all().then(r => r.results);
+      const [wishlist, visits, deals, alerts] = await Promise.all([q('SELECT listing_id,note FROM wishlist WHERE phone=?'), q('SELECT id,listing_id,owner_name,requested_time,status FROM visits WHERE phone=? ORDER BY id DESC LIMIT 10'), q('SELECT listing_id,stage,terms FROM deals WHERE phone=?'), q('SELECT id,criteria,active FROM alerts WHERE phone=? AND active=1')]);
+      return { now_ist: nowIst(), now_iso: new Date().toISOString(), profile: await getProfile(env, n), wishlist, visits, deals: deals.map(d => ({ ...d, terms: j(d.terms) })), alerts: alerts.map(a => ({ ...a, criteria: j(a.criteria) })) };
+    }
+    if (action === 'save_preferences') return { profile: await saveProfile(env, n, name, prefs, null) };
+    if (action === 'wishlist_add') {
+      if (!listing_id || !(await getListing(env, listing_id))) return { error: 'Unknown listing_id; search first.' };
+      await env.DB.prepare('INSERT INTO wishlist(phone,listing_id,note) VALUES(?,?,?) ON CONFLICT(phone,listing_id) DO UPDATE SET note=excluded.note').bind(n, listing_id, note ?? null).run();
+      await updateDeal(env, n, listing_id, null, {});
+      return { ok: true };
+    }
+    if (action === 'wishlist_list') {
+      const rows = (await env.DB.prepare('SELECT listing_id,note FROM wishlist WHERE phone=?').bind(n).all()).results;
+      return { wishlist: await Promise.all(rows.map(async r => ({ ...r, listing: await getListing(env, r.listing_id) }))) };
+    }
+    if (action === 'alert_create') {
+      if (!consent) return { error: 'Ask the tenant for consent to be called about new listings, then pass consent=true.' };
+      const saved = await getProfile(env, n) || {};
+      const crit = Object.fromEntries(['locality', 'bhk', 'max_rent', 'max_deposit', 'amenities', 'furnishing'].map(k => [k, prefs[k] ?? saved[k]]).filter(([, v]) => v != null));
+      const r = await env.DB.prepare('INSERT INTO alerts(phone,criteria,channel,call_if_urgent) VALUES(?,?,?,?)').bind(n, JSON.stringify(crit), 'call', 0).run();
+      return { alert_id: r.meta.last_row_id, criteria: crit, note: 'Checked every 10 minutes; current listings form the baseline, only new ones trigger a call.' };
+    }
+    if (action === 'alert_list') return { alerts: (await env.DB.prepare('SELECT id,criteria,active,last_run FROM alerts WHERE phone=?').bind(n).all()).results.map(a => ({ ...a, criteria: j(a.criteria) })) };
+    if (action === 'alert_cancel') { await env.DB.prepare('UPDATE alerts SET active=0 WHERE id=? AND phone=?').bind(alert_id, n).run(); return { ok: true }; }
+  });
+
+  // ---------------------------------------------------------------- listings
+  tool('listings', `Rental listings. Actions:
+- search: live NoBroker listings (via API.SH) ranked against criteria (locality, bhk, max_rent, max_deposit, amenities, furnishing). Returns listing ids and match_score. Owner contacts are not provided by the source.
+- details: full record for listing_id.
+- check_new: run the new-listing alert check now (normally automatic).`, {
+    action: z.enum(['search', 'details', 'check_new']),
+    locality: opt, bhk: z.number().int().min(1).max(5).optional(), max_rent: z.number().int().positive().optional(),
+    max_deposit: z.number().int().positive().optional(), amenities: z.array(z.string().max(30)).max(8).optional(),
+    furnishing: z.enum(['none', 'semi', 'full']).optional(), include_demo: z.boolean().optional(),
+    limit: z.number().int().min(1).max(10).optional(), listing_id: z.string().max(60).optional(),
+  }, async ({ action, include_demo, limit = 5, listing_id, ...c }) => {
+    if (action === 'details') return { listing: await getListing(env, listing_id) };
+    if (action === 'check_new') return { report: await runAlerts(env) };
+    const r = await findListings(env, c, { includeDemo: !!include_demo });
+    return { total_on_portal: r.total_on_portal, warning: r.warning, results: r.results.slice(0, limit).map(({ lat, lon, image, amenities, street, updated, ...x }) => x) };
+  });
+
+  // ---------------------------------------------------------------- research
+  tool('research', `Research & negotiation specialist (runs Firecrawl + Parallel searches concurrently). Actions:
+- locality: resident reviews (Reddit/forums), safety, rental scams/shady practices, pricing, schools, amenities for a locality (optionally limit topics).
+- dossier: for listing_id, in parallel: market comparison + locality research + negotiation plan. Use before a visit or negotiation.
+- market: rent/deposit statistics for locality+bhk from live comparables.
+- negotiate: negotiation plan for listing_id (opening offer, target, walk-away, deposit plan, leverage, owner script). Pass red_flags from research.
+- web: free-form web search (query). - read_page: read a URL.
+Summarise for the caller in plain speech; say opinions online are unverified.`, {
+    action: z.enum(['locality', 'dossier', 'market', 'negotiate', 'web', 'read_page']),
+    locality: opt, bhk: z.number().int().min(1).max(5).optional(), topics: z.array(z.enum(TOPIC_NAMES)).max(6).optional(),
+    listing_id: z.string().max(60).optional(), max_rent: z.number().int().positive().optional(),
+    max_deposit_months: z.number().min(1).max(12).optional(), red_flags: z.array(z.string().max(200)).max(6).optional(),
+    query: z.string().max(300).optional(), url: z.string().max(500).optional(),
+  }, async ({ action, locality, bhk, topics, listing_id, max_rent, max_deposit_months, red_flags, query, url }) => {
+    if (action === 'locality') return { locality, findings: await researchLocality(env, locality, 'Bengaluru', topics) };
+    if (action === 'market') return marketStats(env, { locality, bhk });
+    if (action === 'web') { const [a, b] = await Promise.all([firecrawlSearch(env, query, 5), parallelSearch(env, query)]); return { results: [...a, ...b] }; }
+    if (action === 'read_page') return { url, text: (await scrapeMarkdown(env, url)) ?? 'Could not fetch this page.' };
+    const listing = await getListing(env, listing_id); if (!listing) return { error: 'Unknown listing_id' };
+    if (action === 'negotiate') return negotiationBrief(env, { listing, max_rent, max_deposit_months, red_flags });
+    const [research, negotiation] = await Promise.all([researchLocality(env, listing.locality, 'Bengaluru', topics), negotiationBrief(env, { listing, max_rent, max_deposit_months, red_flags })]);
+    return { listing, negotiation, locality_research: research };
+  });
+
+  // ---------------------------------------------------------------- visits
+  tool('visits', `Viewing coordination through outbound Talkdesk calls. Actions:
+- schedule: phone, listing_id, owner_phone, owner_name, requested_time (ISO 8601 with +05:30) and mode:
+    "ai_call" (default) = our Owner-Liaison AI agent phones the owner on a separate call, confirms/renegotiates the time, then our agent calls the tenant back with the result;
+    "direct_connect" = the owner is phoned and connected straight to the tenant's phone to talk directly (end your call first so the line is free).
+  Always ask the tenant which mode they want.
+- connect_owner: visit_id; connect tenant and owner directly now (same as direct_connect for an existing visit).
+- status: visit_id. - accept_owner_time: visit_id; tenant accepts the owner's proposed time.
+- demo_owner_reply: visit_id, text; DEMO ONLY, simulates the owner's answer.`, {
+    action: z.enum(['schedule', 'connect_owner', 'status', 'accept_owner_time', 'demo_owner_reply']),
+    phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), owner_phone: z.string().max(20).optional(),
+    owner_name: z.string().max(80).optional(), requested_time: z.string().max(40).optional(),
+    mode: z.enum(['ai_call', 'direct_connect']).optional(), notes: z.string().max(300).optional(),
+    visit_id: z.number().int().optional(), text: z.string().max(200).optional(),
+  }, async ({ action, visit_id, text, ...a }) => {
+    if (action === 'schedule') {
+      if (!a.phone || !a.listing_id || !a.owner_phone || !a.requested_time) return { error: 'schedule needs phone, listing_id, owner_phone and requested_time' };
+      return scheduleVisit(env, a);
+    }
+    if (!visit_id) return { error: 'visit_id required' };
+    if (action === 'connect_owner') return { call: await callOwner(env, visit_id, 'owner_bridge'), say: 'Tell the caller their phone will ring shortly with the owner on the line, then end this call.' };
+    if (action === 'status') return { visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() };
+    if (action === 'accept_owner_time') return confirmProposedTime(env, visit_id);
+    if (action === 'demo_owner_reply') return applyOwnerResponse(env, visit_id, parseReply(text), text);
+  });
+
+  // ---------------------------------------------------------------- deal
+  tool('deal', `Deal tracking and closing. Actions:
+- update: phone, listing_id, stage (${STAGES.join(', ')}) and terms (agreed_rent, agreed_deposit, move_in...).
+- draft_agreement: phone, listing_id, landlord_name, tenant_name, property_address, rent, deposit, start_date (YYYY-MM-DD), optional months/maintenance/lock_in_months/notice_months/escalation_pct/extra_terms. Draft only, not legal advice.
+- call_tenant_later: phone, purpose; schedule an outbound AI follow-up call to the tenant.`, {
+    action: z.enum(['update', 'draft_agreement', 'call_tenant_later']),
+    phone: z.string().min(8).max(20), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
+    terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+    landlord_name: z.string().max(100).optional(), tenant_name: z.string().max(100).optional(), property_address: z.string().max(300).optional(),
+    rent: z.number().int().positive().optional(), deposit: z.number().int().min(0).optional(), start_date: z.string().max(20).optional(),
+    months: z.number().int().min(1).max(60).optional(), maintenance: z.number().int().min(0).optional(), lock_in_months: z.number().int().min(0).optional(),
+    notice_months: z.number().int().min(0).optional(), escalation_pct: z.number().min(0).max(20).optional(), extra_terms: z.array(z.string().max(200)).max(8).optional(),
+    purpose: z.string().max(400).optional(),
+  }, async ({ action, phone: p, listing_id, stage, terms, purpose, ...t }) => {
+    const n = normPhone(p);
+    if (action === 'call_tenant_later') return callTenant(env, { phone: n, purpose: purpose || 'Follow-up' });
+    if (!listing_id) return { error: 'listing_id required' };
+    if (action === 'update') { const d = await updateDeal(env, n, listing_id, stage, terms); return { deal: { ...d, terms: j(d.terms) } }; }
+    for (const k of ['landlord_name', 'tenant_name', 'property_address', 'rent', 'deposit', 'start_date']) if (t[k] == null) return { error: `draft_agreement needs ${k}` };
+    const text = draftAgreement(t);
+    await updateDeal(env, n, listing_id, 'agreement_drafted', { agreed_rent: t.rent, agreed_deposit: t.deposit, start_date: t.start_date });
+    return { agreement_text: text, next_steps: ['Both parties review the draft', 'Verify owner ID and ownership documents', 'E-stamp and sign', 'Pay deposit by bank transfer against a receipt'] };
+  });
+
+  // ---------------------------------------------------------------- outbound-call agents
+  tool('call_context', `For OUTBOUND call agents. Actions:
+- load: FIRST thing on every outbound call. Pass the number you are speaking with (Caller ID) or outreach_id. Returns who you called, why, the briefing and what to do. Also returns current IST time.
+- connect_tenant: the OWNER asked to speak to the tenant directly on this call; returns the tenant number. Then tell the owner you are connecting them and end with the transfer/escalation exit so the flow forwards the call.
+- complete: outreach_id, summary; store a short summary at the end of the call.`, {
+    action: z.enum(['load', 'connect_tenant', 'complete']),
+    phone: z.string().max(20).optional(), outreach_id: z.number().int().optional(), summary: z.string().max(600).optional(),
+  }, async ({ action, phone: p, outreach_id, summary }) => {
+    const o = await getOutreach(env, { outreach_id, phone: p ? normPhone(p) : null });
+    if (!o) return { error: 'No active outbound call found for that number.' };
+    if (action === 'load') { await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('dialing','dry_run')").bind(o.id).run(); return { now_ist: nowIst(), outreach: o }; }
+    if (action === 'connect_tenant') { await env.DB.prepare("UPDATE outreach SET status='transferred' WHERE id=?").bind(o.id).run(); return { forward_to: o.tenant_phone }; }
+    await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(summary || '', o.id).run();
     return { ok: true };
   });
-  tool('get_wishlist', 'List the tenant\'s wishlist with listing details.', { phone }, async ({ phone: p }) => {
-    const rows = (await env.DB.prepare('SELECT listing_id,note FROM wishlist WHERE phone=?').bind(normPhone(p)).all()).results;
-    return { wishlist: await Promise.all(rows.map(async r => ({ ...r, listing: await getListing(env, r.listing_id) }))) };
+
+  tool('owner_response', 'Owner-Liaison agent: record the owner\'s answer to the viewing request. outcome yes / no / reschedule (with proposed_time ISO 8601 +05:30) / other. Optionally the rent/deposit the owner quoted. The tenant is then called back automatically by our tenant agent.', {
+    visit_id: z.number().int(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']), details: z.string().max(400).optional(),
+    proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
+  }, async ({ visit_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
+    const r = await applyOwnerResponse(env, visit_id, outcome, details, proposed_time);
+    if (!r.error && (quoted_rent || quoted_deposit)) {
+      const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first();
+      await updateDeal(env, v.phone, v.listing_id, null, { owner_quoted_rent: quoted_rent, owner_quoted_deposit: quoted_deposit });
+    }
+    return r;
   });
-
-  // ---- Research agent tools ----
-  tool('research_locality', 'Parallel web research (Firecrawl + Parallel) on a locality: resident reviews (Reddit/forums), safety, rental scams/shady practices, pricing, schools, amenities/connectivity. Returns sources with snippets; summarise them for the tenant and cite URLs.', { locality: z.string().max(100), city: z.string().max(50).default('Bengaluru'), topics: z.array(z.enum(TOPIC_NAMES)).max(6).optional() },
-    async ({ locality, city, topics }) => ({ locality, city, findings: await researchLocality(env, locality, city, topics), note: 'Web snippets are unverified opinions; weigh several sources and say so.' }));
-  tool('web_search', 'Free-form web search using both Firecrawl and Parallel, e.g. to check an owner, builder or society reputation.', { query: z.string().min(3).max(300) },
-    async ({ query }) => { const [a, b] = await Promise.all([firecrawlSearch(env, query, 5), parallelSearch(env, query)]); return { results: [...a, ...b] }; });
-  tool('read_web_page', 'Fetch the readable text of a URL (via Firecrawl). Use to read a listing page or a forum thread found in search.', { url: z.string().url().max(500) },
-    async ({ url }) => ({ url, text: await scrapeMarkdown(env, url) ?? 'Could not fetch this page.' }));
-  tool('market_price_estimate', 'Local rent and deposit statistics (median, quartiles, typical deposit months) from live comparable listings.', { locality: z.string().max(100), bhk: z.number().int().min(1).max(5).optional() }, ({ locality, bhk }) => marketStats(env, { locality, bhk }));
-  tool('property_dossier', 'ORCHESTRATOR: for one listing run in parallel the market comparison, locality research (reviews, safety, scams, schools, amenities) and negotiation plan. Use before a visit or negotiation.', { listing_id: z.string().max(60), max_rent: z.number().int().positive().optional(), max_deposit_months: z.number().min(1).max(12).optional() },
-    async ({ listing_id, max_rent, max_deposit_months }) => {
-      const listing = await getListing(env, listing_id); if (!listing) return { error: 'Unknown listing_id' };
-      const [research, brief] = await Promise.all([researchLocality(env, listing.locality, 'Bengaluru'), negotiationBrief(env, { listing, max_rent, max_deposit_months })]);
-      return { listing, negotiation: brief, locality_research: research };
-    });
-
-  // ---- Visit scheduler agent tools ----
-  tool('schedule_visit', 'Arrange a property viewing with the owner via an outbound Talkdesk call. mode "ai_call" (default): our owner-liaison AI agent phones the owner on a separate call, confirms or renegotiates the time, then the tenant is called back with the result. mode "direct_connect": the owner is phoned and connected straight to the tenant\'s phone so they talk directly (end the current call first). Ask the tenant which they prefer. Owner phone must be supplied (portal listings omit it).', { phone, listing_id: z.string().max(60), owner_phone: z.string().min(8).max(20), owner_name: z.string().max(80).optional(), requested_time: z.string().describe('ISO 8601 with offset, e.g. 2026-11-07T11:00:00+05:30'), mode: z.enum(['ai_call', 'direct_connect']).default('ai_call'), notes: z.string().max(300).optional() }, a => scheduleVisit(env, a));
-  tool('connect_with_owner', 'Connect the tenant and owner directly for an existing visit: the owner is phoned and, on answering, forwarded to the tenant\'s phone. Use when the tenant (or owner) asks to talk directly.', { visit_id: z.number().int() }, async ({ visit_id }) => ({ call: await callOwner(env, visit_id, 'owner_bridge'), say: 'Tell the caller their phone will ring shortly with the owner on the line, then end this call.' }));
-  tool('get_visit_status', 'Check a visit request (pending / confirmed / declined / owner_proposed_time / needs_attention) and owner notes.', { visit_id: z.number().int() }, async ({ visit_id }) => ({ visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() }));
-  tool('confirm_proposed_time', 'Tenant accepts the alternative time the owner proposed.', { visit_id: z.number().int() }, ({ visit_id }) => confirmProposedTime(env, visit_id));
-  tool('simulate_owner_reply', 'DEMO ONLY: simulate the owner answering the visit-request call (as if the owner-liaison agent recorded it).', { visit_id: z.number().int(), text: z.string().max(200) },
-    async ({ visit_id, text }) => applyOwnerResponse(env, visit_id, parseReply(text), text));
-
-  // ---- Outbound-call agent tools (owner liaison + tenant callback agents) ----
-  tool('get_outreach_context', 'FIRST CALL on any outbound call: load who you are calling, why, and what to do. Pass the outreach_id from the flow; if unknown pass the number you are speaking with.', { outreach_id: z.number().int().optional(), phone: z.string().max(20).optional() },
-    async ({ outreach_id, phone: p }) => {
-      const o = await getOutreach(env, { outreach_id, phone: p ? normPhone(p) : null });
-      if (!o) return { error: 'No active outreach found.' };
-      await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('dialing','dry_run')").bind(o.id).run();
-      return { outreach: o };
-    });
-  tool('record_owner_response', 'Owner-liaison agent: record the owner\'s answer to the viewing request. outcome yes / no / reschedule (give proposed_time ISO) / other. The tenant is then called back automatically.', { visit_id: z.number().int(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']), details: z.string().max(400).optional(), proposed_time: z.string().optional(), confirmed_rent: z.number().int().optional(), confirmed_deposit: z.number().int().optional() },
-    async ({ visit_id, outcome, details, proposed_time, confirmed_rent, confirmed_deposit }) => {
-      const r = await applyOwnerResponse(env, visit_id, outcome, details, proposed_time);
-      if (!r.error && (confirmed_rent || confirmed_deposit)) { const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first(); await updateDeal(env, v.phone, v.listing_id, null, { owner_quoted_rent: confirmed_rent, owner_quoted_deposit: confirmed_deposit }); }
-      return r;
-    });
-  tool('request_direct_connect', 'Owner-liaison agent: the owner wants to speak to the tenant directly on this same call. Records it and returns the number; then end your turn with the transfer exit so the flow forwards the call to tenant_number.', { outreach_id: z.number().int() },
-    async ({ outreach_id }) => { const o = await getOutreach(env, { outreach_id }); if (!o) return { error: 'unknown outreach' }; await env.DB.prepare("UPDATE outreach SET status='transferred' WHERE id=?").bind(outreach_id).run(); return { forward_to: o.tenant_phone, say: 'Let the owner know you are connecting them to the tenant now.' }; });
-  tool('complete_outreach', 'End-of-call: store a short summary of an outbound call.', { outreach_id: z.number().int(), summary: z.string().max(600) },
-    async ({ outreach_id, summary }) => { await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(summary, outreach_id).run(); return { ok: true }; });
-  tool('list_outreach', 'Recent outbound calls (for debugging/demo).', { limit: z.number().int().min(1).max(20).default(10) }, async ({ limit }) => ({ calls: (await env.DB.prepare('SELECT id,kind,to_phone,visit_id,alert_id,purpose,status,error,summary,created_at FROM outreach ORDER BY id DESC LIMIT ?').bind(limit).all()).results }));
-
-  // ---- Alert agent tools ----
-  tool('create_listing_alert', 'Watch for NEW listings matching criteria; every 10 min the system checks and, on new matches, our AI agent phones the tenant for a two-way conversation (walk through listings, book visits, update preferences). Requires the tenant\'s consent.', { phone, ...criteria, consent: z.boolean().describe('Tenant explicitly agreed to alerts') },
-    async ({ phone: p, consent, ...c }) => {
-      if (!consent) return { error: 'Need tenant consent before creating alerts.' };
-      const r = await env.DB.prepare('INSERT INTO alerts(phone,criteria,channel,call_if_urgent) VALUES(?,?,?,?)').bind(normPhone(p), JSON.stringify(c), 'call', 0).run();
-      return { alert_id: r.meta.last_row_id, status: 'active', note: 'First check records current listings as a baseline; only listings that appear afterwards trigger alerts.' };
-    });
-  tool('list_listing_alerts', 'List a tenant\'s alerts.', { phone }, async ({ phone: p }) => ({ alerts: (await env.DB.prepare('SELECT id,criteria,channel,call_if_urgent,active,last_run FROM alerts WHERE phone=?').bind(normPhone(p)).all()).results.map(a => ({ ...a, criteria: j(a.criteria) })) }));
-  tool('cancel_listing_alert', 'Stop an alert.', { alert_id: z.number().int(), phone }, async ({ alert_id, phone: p }) => { await env.DB.prepare('UPDATE alerts SET active=0 WHERE id=? AND phone=?').bind(alert_id, normPhone(p)).run(); return { ok: true }; });
-  tool('run_alert_check_now', 'Run the new-listing check immediately (normally scheduled).', {}, async () => ({ report: await runAlerts(env) }));
-  tool('call_tenant', 'Schedule an outbound AI call to the tenant (follow-up/reminder). The callback agent holds a two-way conversation using the purpose you give.', { phone, purpose: z.string().min(1).max(400) },
-    async ({ phone: p, purpose }) => callTenant(env, { phone: normPhone(p), purpose }));
-
-  // ---- Negotiator / closer agent tools ----
-  tool('negotiation_brief', 'Rent and deposit negotiation plan for a listing: market comparison, opening offer, target, walk-away, leverage, owner script, safety checklist. Pass research red flags you found.', { listing_id: z.string().max(60), max_rent: z.number().int().positive().optional(), max_deposit_months: z.number().min(1).max(12).optional(), red_flags: z.array(z.string().max(200)).max(6).optional(), lease_months: z.number().int().min(1).max(36).default(11) },
-    async ({ listing_id, ...r }) => { const listing = await getListing(env, listing_id); return listing ? negotiationBrief(env, { listing, ...r }) : { error: 'Unknown listing_id' }; });
-  tool('update_deal', `Track a deal. Stages: ${STAGES.join(', ')}. Terms (agreed_rent, agreed_deposit, move_in, owner_name...) are merged.`, { phone, listing_id: z.string().max(60), stage: z.enum(STAGES).optional(), terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional() },
-    async ({ phone: p, listing_id, stage, terms }) => { const d = await updateDeal(env, normPhone(p), listing_id, stage, terms); return { deal: { ...d, terms: j(d.terms) } }; });
-  tool('draft_rental_agreement', 'Produce a draft rental agreement text from agreed terms. Draft only, not legal advice; must be reviewed, stamped and signed by the parties. Moves the deal to agreement_drafted.', { phone, listing_id: z.string().max(60), landlord_name: z.string().max(100), tenant_name: z.string().max(100), property_address: z.string().max(300), rent: z.number().int().positive(), deposit: z.number().int().min(0), start_date: z.string().describe('YYYY-MM-DD'), months: z.number().int().min(1).max(60).default(11), maintenance: z.number().int().min(0).optional(), lock_in_months: z.number().int().min(0).optional(), notice_months: z.number().int().min(0).optional(), escalation_pct: z.number().min(0).max(20).optional(), extra_terms: z.array(z.string().max(200)).max(8).optional() },
-    async ({ phone: p, listing_id, ...t }) => {
-      const text = draftAgreement(t);
-      await updateDeal(env, normPhone(p), listing_id, 'agreement_drafted', { agreed_rent: t.rent, agreed_deposit: t.deposit, start_date: t.start_date });
-      return { agreement_text: text, next_steps: ['Send draft to both parties for review', 'Verify owner ID and ownership documents', 'Print on stamp paper / e-stamp and sign', 'Pay deposit by bank transfer against a receipt'] };
-    });
   return s;
 }
 
