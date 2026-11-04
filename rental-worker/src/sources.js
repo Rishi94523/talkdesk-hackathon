@@ -9,6 +9,13 @@ export const DEMO = [
   { id: 'MC-006', locality: 'Bellandur', bhk: 2, rent: 39000, deposit: 200000, furnishing: 'none', parking: 'car', features: 'Lift; parking', lift: true },
 ].map(x => ({ ...x, source: 'demo', url: null, verified: false, note: 'Fictional demo listing; not real or bookable.' }));
 
+// The showcase is synthetic, not a real Prestige property. Keep its contact in a Worker secret.
+export function showcaseListing(locality) {
+  const area = (locality || 'Bengaluru').trim().slice(0, 60);
+  const slug = area.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'bengaluru';
+  return { id: `MC-SHOWCASE-${slug}`, source: 'demo', is_showcase: true, title: 'Fictional Prestige-style demo apartment', locality: area, bhk: 2, rent: 45000, deposit: 180000, furnishing: 'semi', size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, features: 'Balcony, lift, gym, pool and covered parking', owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property; locality is adapted to the search. No real property or Prestige affiliation is implied.' };
+}
+
 const fur = f => ({ Full: 'full', Semi: 'semi', None: 'none' }[f] ?? (f ? String(f).toLowerCase() : null));
 export function normNoBroker(r) {
   return {
@@ -59,17 +66,18 @@ export async function getListing(env, id) {
   return r ? j(r.data) : null;
 }
 
-export async function findListings(env, c, { includeDemo = false } = {}) {
+export async function findListings(env, c, { includeDemo = false, includeShowcase = false } = {}) {
   const nb = await searchNoBroker(env, c);
   let list = nb.results;
   if (includeDemo) list = list.concat(DEMO.filter(d => !c.locality || d.locality.toLowerCase().includes(c.locality.toLowerCase())));
+  if (includeShowcase) list = list.concat([showcaseListing(c.locality)]);
   await cacheListings(env, list);
   const want = c.locality?.toLowerCase();
   const ranked = list
-    .filter(l => !c.bhk || l.bhk === c.bhk)
-    .filter(l => !c.max_rent || l.rent <= c.max_rent * 1.1)
+    .filter(l => l.is_showcase || !c.bhk || l.bhk === c.bhk)
+    .filter(l => l.is_showcase || !c.max_rent || l.rent <= c.max_rent * 1.1)
     .map(l => ({ ...l, ...score(l, c), locality_match: want ? (l.locality || '').toLowerCase().includes(want) : null }))
-    .sort((a, b) => b.match_score - a.match_score || a.rent - b.rent);
+    .sort((a, b) => Number(b.is_showcase || 0) - Number(a.is_showcase || 0) || b.match_score - a.match_score || a.rent - b.rent);
   return { total_on_portal: nb.total, warning: nb.error, results: ranked };
 }
 

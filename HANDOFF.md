@@ -1,0 +1,26 @@
+# MergeConflicts rental concierge handoff
+
+## User's direction
+
+- Build a useful Bengaluru rental concierge, not a graph for appearance. A tenant calls and discusses locality, BHK, rent and deposit limits, amenities and move-in date. The supervisor should describe candidate properties proactively, offer detail and ask whether to arrange a viewing or discuss negotiation.
+- Distinct specialist agents should genuinely handle listing search, locality research, memory, viewing coordination and deal/negotiation advice. An owner-liaison voice agent must separately call the owner to coordinate a visit or negotiate within explicit tenant limits; the tenant should be informed of the result. WhatsApp or SMS is desired for links, owner outreach and alerts when available. New matches should trigger consented alerts.
+- Use API.SH, Parallel and Firecrawl. Search web leads and public owner contacts when available; never invent a number or present a generic website number as a property owner's. Do not read raw URLs aloud on a voice call; give useful details conversationally and offer a message when messaging works.
+- Keep a summary of every call plus structured property interactions so returning calls remember preferences, discussed/rejected properties, visit status and open tasks. Make the context bounded and retrieve older material as needed.
+- For the demo, include a fictional Prestige-style showcase apartment adapted to the requested locality, owned by Rishi D V. The user authorized using their phone number from the Worker secret for owner-call tests. Do not hardcode or commit the number. Always identify this property as fictional; it is not associated with the real developer.
+- Team resources must include `MergeConflicts`. Never alter other teams' resources. Commit and push after every completed milestone without asking again. Do not commit credentials or expose them in logs.
+
+## Current state (2026-11-04)
+
+- Talkdesk `Rental_MultiAgent_MergeConflicts` is an unpublished draft with a supervisor, routing conditions and five specialists. A simulator trace demonstrated supervisor -> locality researcher -> supervisor, and a later response included source links; links and claims were not independently checked. It is not connected to the current phone flow. See `MULTI_AGENT_STATUS.md`.
+- The existing published `Rental_Concierge_MergeConflicts` V1 and `Rental_Inbound_MergeConflicts` still provide the earlier fictional-demo experience. The MCP server preserves its legacy tool names. The active team phone number was assigned to the inbound flow in an earlier session; verify current routing before claiming it works.
+- Cloudflare Worker `mergeconflicts-rentals-mcp` uses D1 `mergeconflicts-rentals-demo` and a shared demo bearer token. Local source and migrations include conversation summaries, property events and bounded memory retrieval; full transcripts and guaranteed end-of-call summaries are not implemented.
+- The current search returns an adaptive, explicitly fictional showcase plus NoBroker results and separate Parallel/Firecrawl leads. It stores the showcase in D1 so its ID resolves across tools. The showcase must not enter scheduled alert results. Provider snippets are not reliable proof of owner phone numbers. See source and tests for current behavior.
+- Outbound Talkdesk owner/tenant flow IDs and messaging are not yet configured. `placeCall` returns dry_run when the relevant flow ID is absent. A draft graph alone does not make owner calls, viewing confirmations or negotiation operational.
+
+## Next work
+
+1. Map BHK, maximum rent/deposit, amenities and tenant identity through Talkdesk's search skill; map memory actions and required visit and deal tool inputs. Test routing, tool arguments, actual property descriptions and multi-turn continuity in the simulator.
+2. Build and test team-only owner-liaison and tenant callback orchestrations and API-triggered Studio flows, configure least-privilege OAuth and appropriate outbound phone capability. Distinguish call initiated, answered and owner confirmed. Use the authorized showcase phone only for an agreed demo call.
+3. Add sourced contact discovery, website/phone provenance and freshness; do not treat phone numbers found in generic search results as owner contacts without an explicit association. Add source-specific restrictions and test before claiming coverage.
+4. Add a reliable per-call summary capture (including interrupted calls), history retrieval and deliberate property interaction recording. Verify repeat prevention and user isolation across calls. Add authentication before disclosing tenant data; the current shared bearer token and Caller ID are demo-only.
+5. Test source attribution, safety claims, budget filtering, owner availability, unsupported scenarios and voice behavior. Deploy and switch the team number only after the new flow passes. Document exact deployed version, results and any blockers.
