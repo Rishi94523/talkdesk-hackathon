@@ -35,7 +35,9 @@ export async function scheduleVisit(env, a) {
     .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null, a.dry_run_only ? 1 : 0).run();
   const id = ins.meta.last_row_id;
   await recordProperty(env, phone, a.listing_id, 'visit_requested', null, null, `visit:${id}`);
-  const call = await callOwner(env, id, mode);
+  // Test requests must remain non-dialing even after live flow IDs are configured.
+  const callEnv = a.dry_run_only ? { ...env, TD_FLOW_OWNER_AI: null } : env;
+  const call = await callOwner(callEnv, id, mode);
   return {
     visit_id: id, status: 'pending', call,
     strategy: call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.'
