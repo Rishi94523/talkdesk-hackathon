@@ -17,8 +17,7 @@ export async function send(env, { channel, to, body, ref_type = null, ref_id = n
   let status = 'dry_run', provider_id = null, error = null;
   if (configured(env)) {
     let res;
-    if (channel === 'whatsapp') res = env.TWILIO_WHATSAPP_FROM ? await twilio(env, 'Messages', { To: 'whatsapp:' + to, From: 'whatsapp:' + env.TWILIO_WHATSAPP_FROM, Body: body }) : { ok: false, error: 'TWILIO_WHATSAPP_FROM missing' };
-    else if (channel === 'sms') res = env.TWILIO_SMS_FROM ? await twilio(env, 'Messages', { To: to, From: env.TWILIO_SMS_FROM, Body: body }) : { ok: false, error: 'TWILIO_SMS_FROM missing' };
+    if (channel === 'sms') res = env.TWILIO_SMS_FROM ? await twilio(env, 'Messages', { To: to, From: env.TWILIO_SMS_FROM, Body: body }) : { ok: false, error: 'TWILIO_SMS_FROM missing' };
     else if (channel === 'call') {
       const say = `<Say voice="Polly.Aditi" language="en-IN">${esc(body)}</Say>`;
       const twiml = voice_action ? `<Response><Gather numDigits="1" timeout="8" action="${esc(voice_action)}">${say}</Gather><Say>We did not get a response. Goodbye.</Say></Response>` : `<Response>${say}</Response>`;
@@ -31,7 +30,6 @@ export async function send(env, { channel, to, body, ref_type = null, ref_id = n
   return { message_id: r.meta.last_row_id, channel, to, status, ...(error ? { error } : {}), ...(status === 'dry_run' ? { note: 'Voice provider not configured: call recorded, not placed.' } : {}) };
 }
 
-// Best channel for a person: WhatsApp if configured, else SMS.
 // Voice-only for now: WhatsApp/SMS code paths remain but are unused.
 export const defaultChannel = () => 'call';
 

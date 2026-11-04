@@ -9,7 +9,7 @@ if not token_path.exists(): token_path.write_text(secrets.token_urlsafe(48),enco
 token=token_path.read_text(encoding='utf-8').strip()
 env=dotenv_values(ROOT.parent/'.env')
 if not env.get('PARALLEL_API_KEY'): raise SystemExit('PARALLEL_API_KEY missing from project .env')
-names=['PARALLEL_API_KEY','API_SH','FIRECRAWL_API','TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_SMS_FROM','TWILIO_WHATSAPP_FROM']
+names=['PARALLEL_API_KEY','API_SH','FIRECRAWL_API','TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_VOICE_FROM']
 for name,value in [('MCP_BEARER_TOKEN',token)]+[(n,env[n]) for n in names if env.get(n)]:
     result=subprocess.run(['wrangler.cmd','secret','put',name],cwd=ROOT,input=value,text=True,encoding='utf-8',errors='replace',capture_output=True,shell=True)
     if result.returncode: raise SystemExit(f'Failed to upload {name}; check Cloudflare authentication.')
