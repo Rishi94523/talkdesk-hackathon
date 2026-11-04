@@ -75,8 +75,16 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
   if (purpose === 'negotiation' && (!offer || (!max_rent && !max_deposit))) return { error: 'Negotiation requires the tenant’s offer and at least one explicit rent or deposit limit.' };
   if (purpose === 'signing_intent' && !move_in_date) return { error: 'Ask the tenant for their preferred move-in date before informing the owner.' };
   await updateDeal(env, tenantPhone, listing_id, purpose === 'negotiation' ? 'negotiating' : null, { ...(offer ? { tenant_offer: offer } : {}), ...(max_rent ? { authorized_max_rent: max_rent } : {}), ...(max_deposit ? { authorized_max_deposit: max_deposit } : {}), ...(move_in_date ? { proposed_move_in_date: move_in_date } : {}), ...(notes ? { tenant_instructions: notes } : {}) });
+  const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || 'property'} in ${listing.locality || 'Bengaluru'}`;
+  const ask = purpose === 'negotiation'
+    ? `The tenant${visit.status === 'confirmed' ? ', who has a viewing arranged,' : ''} would like to discuss the terms: they offer ${offer}.`
+    : `The tenant would like to go ahead and rent it, moving in around ${move_in_date}.`;
   const call = await placeCall(env, { kind: 'owner_ai', to: visit.owner_phone, tenant_phone: tenantPhone, owner_phone: visit.owner_phone, visit_id: visit.id, purpose, briefing: {
     role: 'You are an AI assistant calling the property owner on behalf of a prospective tenant.',
+    spoken_intro: `Hello${visit.owner_name ? ' ' + visit.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of the prospective tenant about your ${place}.`,
+    what_to_say: ask,
+    ...(purpose === 'negotiation' ? { private_limit_never_say: { max_rent: max_rent || null, max_deposit: max_deposit || null } } : {}),
+    listed_terms: { rent: listing.rent ?? null, deposit: listing.deposit ?? null },
     task: purpose, listing: { id: listing.id, title: listing.title, locality: listing.locality }, visit_id: visit.id,
     tenant_offer: offer || null, authorized_max_rent: max_rent || null, authorized_max_deposit: max_deposit || null,
     proposed_move_in_date: move_in_date || null, tenant_instructions: notes || null,
@@ -94,7 +102,9 @@ export async function recordOwnerDiscussion(env, outreach, { outcome, details, q
   const note = (details || outcome).slice(0, 400);
   await updateDeal(env, outreach.tenant_phone, listingId, null, { owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}) });
   await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(`Owner response (${outcome}): ${note}`.slice(0, 500), outreach.id).run();
-  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `Owner response to ${outreach.purpose}`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: 'Explain the owner response accurately and discuss the tenant’s next step.' } });
+  const what = outreach.purpose === 'negotiation' ? `your offer${briefing.tenant_offer ? ' of ' + briefing.tenant_offer : ''}` : 'your intention to rent';
+  const said = { yes: 'accepted', no: 'did not accept', other: 'replied' }[outcome] || outcome;
+  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `${outreach.purpose === 'negotiation' ? 'Negotiation' : 'Rental intent'} update: the owner ${said} ${what} for ${briefing.listing?.title || 'the property'}${details && details !== outcome ? ': ' + details.slice(0, 200) : ''}. Tell the tenant exactly this, discuss their next step, and do not claim an agreement beyond what the owner said.`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: 'Explain the owner response accurately and discuss the tenant’s next step.' } });
   return { recorded: true, outcome, tenant_call };
 }
 

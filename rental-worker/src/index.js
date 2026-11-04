@@ -15,6 +15,24 @@ import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply,
 //   Tenant callback (outbound): call_context, tenant, listings, visits, research
 const nowIst = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' });
 const opt = z.string().max(100).optional();
+const spokenTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
+// A short spoken recap of the caller's open threads so a returning call can continue where it left off.
+async function callerRecap(env, visits, deals) {
+  const parts = [];
+  for (const v of visits.filter(v => v.status !== 'cancelled').slice(0, 2)) {
+    const l = await getListing(env, v.listing_id);
+    const name = l ? `${l.title || 'the property'} (${l.bhk ? l.bhk + ' BHK, ' : ''}${l.locality || ''})` : v.listing_id;
+    const st = { confirmed: 'the owner confirmed', pending: 'waiting for the owner', declined: 'the owner declined', owner_proposed_time: 'the owner proposed another time', needs_attention: 'the owner needs more information' }[v.status] || v.status;
+    parts.push(`Viewing of ${name} on ${spokenTime(v.requested_time)}: ${st}.`);
+  }
+  for (const d of deals.slice(0, 2)) {
+    const t = j(d.terms);
+    const bits = [d.stage && `stage ${d.stage.replace(/_/g, ' ')}`, t.tenant_offer && `your offer ${t.tenant_offer}`, t.authorized_max_rent && `your limit ${t.authorized_max_rent}`, t.owner_response && `owner said ${t.owner_response}${t.owner_response_details && t.owner_response_details !== t.owner_response ? ' (' + t.owner_response_details + ')' : ''}`].filter(Boolean);
+    if (bits.length) parts.push(`Deal on ${d.listing_id.startsWith('MC-SHOWCASE') ? 'MergeConflicts Garden Residences' : d.listing_id}: ${bits.join(', ')}.`);
+  }
+  return parts.length ? parts.join(' ') : null;
+}
+
 
 function makeServer(env) {
   const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
@@ -41,7 +59,7 @@ function makeServer(env) {
     if (action === 'get') {
       const q = sql => env.DB.prepare(sql).bind(n).all().then(r => r.results);
       const [wishlist, visits, deals, alerts] = await Promise.all([q('SELECT listing_id,note FROM wishlist WHERE phone=?'), q('SELECT id,listing_id,owner_name,requested_time,status FROM visits WHERE phone=? ORDER BY id DESC LIMIT 10'), q('SELECT listing_id,stage,terms FROM deals WHERE phone=?'), q('SELECT id,criteria,active FROM alerts WHERE phone=? AND active=1')]);
-      return { now_ist: nowIst(), now_iso: new Date().toISOString(), profile: await getProfile(env, n), wishlist: wishlist.slice(0,10), visits, deals: deals.slice(0,10).map(d => ({ ...d, terms: j(d.terms) })), alerts, memory: await getMemory(env, n) };
+      return { now_ist: nowIst(), now_iso: new Date().toISOString(), returning_caller_recap: await callerRecap(env, visits, deals), profile: await getProfile(env, n), wishlist: wishlist.slice(0,10), visits, deals: deals.slice(0,10).map(d => ({ ...d, terms: j(d.terms) })), alerts, memory: await getMemory(env, n) };
     }
     if (action === 'save_summary') return saveSummary(env, n, session_id, summary);
     if (action === 'record_property') return recordProperty(env, n, listing_id, property_status, note, session_id, event_key);
@@ -156,6 +174,7 @@ function makeServer(env) {
   }, async ({ action, phone: p, listing_id, stage, terms, purpose, ...t }) => {
     const n = normPhone(p);
     if (action === 'call_tenant_later') return callTenant(env, { phone: n, purpose: purpose || 'Follow-up' });
+    if (!listing_id && (action === 'negotiate_owner' || action === 'communicate_intent')) listing_id = (await env.DB.prepare("SELECT listing_id FROM visits WHERE phone=? AND status NOT IN ('cancelled') ORDER BY id DESC LIMIT 1").bind(n).first())?.listing_id;
     if (!listing_id) return { error: 'listing_id required' };
     if (action === 'negotiate_owner' || action === 'communicate_intent') return startOwnerDiscussion(env, { phone: n, listing_id, purpose: action === 'negotiate_owner' ? 'negotiation' : 'signing_intent', offer: t.offer, max_rent: t.max_rent, max_deposit: t.max_deposit, move_in_date: t.move_in_date, notes: t.notes });
     if (action === 'update') { const d = await updateDeal(env, n, listing_id, stage, terms); return { deal: { ...d, terms: j(d.terms) } }; }
