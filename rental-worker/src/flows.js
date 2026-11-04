@@ -30,7 +30,7 @@ export async function scheduleVisit(env, a) {
   const phone = normPhone(a.phone), owner = normPhone(a.owner_phone);
   const prof = await getProfile(env, phone);
   const tenant = prof?.name || 'a prospective tenant';
-  const mode = a.mode === 'direct_connect' ? 'owner_bridge' : 'owner_ai';
+  const mode = 'owner_ai';
   const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes) VALUES(?,?,?,?,?,?,?)')
     .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null).run();
   const id = ins.meta.last_row_id;
@@ -38,9 +38,8 @@ export async function scheduleVisit(env, a) {
   const call = await callOwner(env, id, mode);
   return {
     visit_id: id, status: 'pending', call,
-    strategy: call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.' : mode === 'owner_ai'
-      ? `Our owner-liaison AI agent is calling ${a.owner_name || 'the owner'} on a separate call to confirm ${fmtTime(when)} (or agree another time). The tenant gets a call back with the result. If the owner asks to speak to the tenant, the call is forwarded to the tenant.`
-      : `Calling the owner now; when they answer they hear a short introduction and are connected straight to the tenant's phone. End this call so the tenant's line is free.`,
+    strategy: call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.'
+      : `The owner call was initiated to discuss ${fmtTime(when)}. An answered call and a confirmed appointment are separate outcomes.`,
   };
 }
 
@@ -53,7 +52,7 @@ function ownerBriefing(v, listing, prof) {
     listing: listing ? { id: listing.id, title: listing.title, locality: listing.locality, rent: listing.rent, deposit: listing.deposit, url: listing.url } : null,
     visit_id: v.id, requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
     spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing.`,
-    when_done: 'Call owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. If the owner wants to talk to the tenant directly, call call_context action=connect_tenant, tell the owner you are connecting them, then end with the transfer exit.',
+    when_done: 'Call owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. Do not transfer or bridge the call.',
   };
 }
 
@@ -61,6 +60,39 @@ export async function callOwner(env, visitId, mode = 'owner_ai') {
   const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
   const listing = await getListing(env, v.listing_id), prof = await getProfile(env, v.phone);
   return placeCall(env, { kind: mode, to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing request for listing ${v.listing_id}`, briefing: ownerBriefing(v, listing, prof) });
+}
+
+// A negotiation or intent is a separate owner conversation, never a call bridge.
+export async function startOwnerDiscussion(env, { phone, listing_id, purpose, offer, max_rent, max_deposit, move_in_date, notes }) {
+  const tenantPhone = normPhone(phone);
+  const listing = await getListing(env, listing_id);
+  if (!listing) return { error: 'Unknown listing_id; select a property first.' };
+  const visit = await env.DB.prepare('SELECT * FROM visits WHERE phone=? AND listing_id=? ORDER BY id DESC LIMIT 1').bind(tenantPhone, listing_id).first();
+  if (!visit?.owner_phone) return { error: 'No owner contact is available for this property.' };
+  if (purpose === 'negotiation' && (!offer || (!max_rent && !max_deposit))) return { error: 'Negotiation requires the tenant’s offer and at least one explicit rent or deposit limit.' };
+  if (purpose === 'signing_intent' && !move_in_date) return { error: 'Ask the tenant for their preferred move-in date before informing the owner.' };
+  await updateDeal(env, tenantPhone, listing_id, purpose === 'negotiation' ? 'negotiating' : null, { ...(offer ? { tenant_offer: offer } : {}), ...(max_rent ? { authorized_max_rent: max_rent } : {}), ...(max_deposit ? { authorized_max_deposit: max_deposit } : {}), ...(move_in_date ? { proposed_move_in_date: move_in_date } : {}), ...(notes ? { tenant_instructions: notes } : {}) });
+  const call = await placeCall(env, { kind: 'owner_ai', to: visit.owner_phone, tenant_phone: tenantPhone, owner_phone: visit.owner_phone, visit_id: visit.id, purpose, briefing: {
+    role: 'You are an AI assistant calling the property owner on behalf of a prospective tenant.',
+    task: purpose, listing: { id: listing.id, title: listing.title, locality: listing.locality }, visit_id: visit.id,
+    tenant_offer: offer || null, authorized_max_rent: max_rent || null, authorized_max_deposit: max_deposit || null,
+    proposed_move_in_date: move_in_date || null, tenant_instructions: notes || null,
+    instruction: 'Discuss only the authorized terms; record the owner response. Do not claim acceptance without explicit agreement or transfer the call to the tenant.',
+  } });
+  return { status: call.status === 'dialing' ? 'outreach_initiated' : 'outreach_not_started', call };
+}
+
+export async function recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit }) {
+  if (!outreach || !['negotiation', 'signing_intent'].includes(outreach.purpose)) return { error: 'An active negotiation or signing-intent outreach is required.' };
+  if (outreach.status === 'completed') return { error: 'This owner response was already recorded; do not send another callback.' };
+  const briefing = j(outreach.briefing);
+  const listingId = briefing.listing?.id;
+  if (!listingId || !outreach.tenant_phone) return { error: 'Outreach is missing its tenant or property.' };
+  const note = (details || outcome).slice(0, 400);
+  await updateDeal(env, outreach.tenant_phone, listingId, null, { owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}) });
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(`Owner response (${outcome}): ${note}`.slice(0, 500), outreach.id).run();
+  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `Owner response to ${outreach.purpose}`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: 'Explain the owner response accurately and discuss the tenant’s next step.' } });
+  return { recorded: true, outcome, tenant_call };
 }
 
 // Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.

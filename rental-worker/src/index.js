@@ -6,7 +6,7 @@ import { findListings, getListing, marketStats, researchLocality, firecrawlSearc
 import { getOutreach } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
 import { registerLegacy } from './legacy.js';
-import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits } from './flows.js';
+import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits, startOwnerDiscussion, recordOwnerDiscussion } from './flows.js';
 
 // Talkdesk orchestrations allow 5 skills and each MCP skill binds ONE tool, so the server exposes a few
 // multi-action tools. Each Talkdesk agent picks the subset it needs:
@@ -18,7 +18,7 @@ const opt = z.string().max(100).optional();
 
 function makeServer(env) {
   const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
-  const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['action', 'phone'], call_context: ['action'], owner_response: ['visit_id', 'outcome'] };
+  const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['action', 'phone'], call_context: ['action'], owner_response: ['outcome'] };
   const tool = (name, description, shape, fn, required = REQ[name] || []) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
     const missing = required.filter(k => a[k] == null || a[k] === '');
     if (missing.length) return fail('Missing required: ' + missing.join(', '));
@@ -108,11 +108,11 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- visits
-  tool('visits', 'Book viewings by outbound Talkdesk call. action: schedule (phone, listing_id, owner_phone, owner_name, requested_time ISO+05:30, mode ai_call = our AI calls owner separately / direct_connect = owner connected to tenant), connect_owner, status, accept_owner_time, demo_owner_reply (visit_id).', {
-    action: z.enum(['schedule', 'connect_owner', 'status', 'accept_owner_time', 'demo_owner_reply']).optional(),
+  tool('visits', 'Coordinate a viewing through a separate owner AI call. action: schedule (phone, listing_id, owner_phone, owner_name, requested_time ISO+05:30), status, accept_owner_time, demo_owner_reply (visit_id). Do not promise confirmation until the owner agrees.', {
+    action: z.enum(['schedule', 'status', 'accept_owner_time', 'demo_owner_reply']).optional(),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), owner_phone: z.string().max(20).optional(),
     owner_name: z.string().max(80).optional(), requested_time: z.string().max(40).optional(),
-    mode: z.enum(['ai_call', 'direct_connect']).optional(), notes: z.string().max(300).optional(),
+    notes: z.string().max(300).optional(),
     visit_id: z.number().int().optional(), text: z.string().max(200).optional(),
   }, async ({ action, visit_id, text, ...a }) => {
     if (action === 'schedule') {
@@ -122,31 +122,26 @@ function makeServer(env) {
       return scheduleVisit(env, a);
     }
     if (!visit_id) return { error: 'visit_id required' };
-    if (action === 'connect_owner') {
-      const call = await callOwner(env, visit_id, 'owner_bridge');
-      return { call, say: call.status === 'dialing'
-        ? 'The owner call was initiated; the connection is not confirmed yet.'
-        : 'The owner call was not initiated. Keep the request pending and do not promise a callback.' };
-    }
     if (action === 'status') return { visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() };
     if (action === 'accept_owner_time') return confirmProposedTime(env, visit_id);
     if (action === 'demo_owner_reply') return applyOwnerResponse(env, visit_id, parseReply(text), text);
   });
 
   // ---------------------------------------------------------------- deal
-  tool('deal', 'Deal tracking/closing. action: update (phone, listing_id, stage, terms), draft_agreement (landlord_name, tenant_name, property_address, rent, deposit, start_date; draft, not legal advice), call_tenant_later (phone, purpose: schedule an AI follow-up call).', {
-    action: z.enum(['update', 'draft_agreement', 'call_tenant_later']).optional(),
+  tool('deal', 'Deal tracking. Actions: update; negotiate_owner (phone, listing_id, offer and explicit max_rent and/or max_deposit); communicate_intent (phone, listing_id, move_in_date); draft_agreement; call_tenant_later. Owner outreach is a separate two-way AI call; never promise the call or agreement succeeded unless its result confirms it.', {
+    action: z.enum(['update', 'draft_agreement', 'call_tenant_later', 'negotiate_owner', 'communicate_intent']).optional(),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
     terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
     landlord_name: z.string().max(100).optional(), tenant_name: z.string().max(100).optional(), property_address: z.string().max(300).optional(),
     rent: z.number().int().positive().optional(), deposit: z.number().int().min(0).optional(), start_date: z.string().max(20).optional(),
     months: z.number().int().min(1).max(60).optional(), maintenance: z.number().int().min(0).optional(), lock_in_months: z.number().int().min(0).optional(),
     notice_months: z.number().int().min(0).optional(), escalation_pct: z.number().min(0).max(20).optional(), extra_terms: z.array(z.string().max(200)).max(8).optional(),
-    purpose: z.string().max(400).optional(),
+    purpose: z.string().max(400).optional(), offer: z.string().max(400).optional(), max_rent: z.number().int().positive().optional(), max_deposit: z.number().int().positive().optional(), move_in_date: z.string().max(40).optional(), notes: z.string().max(400).optional(),
   }, async ({ action, phone: p, listing_id, stage, terms, purpose, ...t }) => {
     const n = normPhone(p);
     if (action === 'call_tenant_later') return callTenant(env, { phone: n, purpose: purpose || 'Follow-up' });
     if (!listing_id) return { error: 'listing_id required' };
+    if (action === 'negotiate_owner' || action === 'communicate_intent') return startOwnerDiscussion(env, { phone: n, listing_id, purpose: action === 'negotiate_owner' ? 'negotiation' : 'signing_intent', offer: t.offer, max_rent: t.max_rent, max_deposit: t.max_deposit, move_in_date: t.move_in_date, notes: t.notes });
     if (action === 'update') { const d = await updateDeal(env, n, listing_id, stage, terms); return { deal: { ...d, terms: j(d.terms) } }; }
     for (const k of ['landlord_name', 'tenant_name', 'property_address', 'rent', 'deposit', 'start_date']) if (t[k] == null) return { error: `draft_agreement needs ${k}` };
     const text = draftAgreement(t);
@@ -155,22 +150,27 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- outbound-call agents
-  tool('call_context', 'For OUTBOUND call agents. action: load (FIRST step; pass phone = Caller ID; returns who/why/briefing), connect_tenant (owner wants the tenant on this call; returns number, then use the transfer exit), complete (outreach_id, summary).', {
-    action: z.enum(['load', 'connect_tenant', 'complete']).optional(),
+  tool('call_context', 'For outbound call agents: load the briefing using outreach_id, or mark the outreach complete with a summary.', {
+    action: z.enum(['load', 'complete']).optional(),
     phone: z.string().max(20).optional(), outreach_id: z.number().int().optional(), summary: z.string().max(600).optional(),
   }, async ({ action, phone: p, outreach_id, summary }) => {
     const o = await getOutreach(env, { outreach_id, phone: p ? normPhone(p) : null });
     if (!o) return { error: 'No active outbound call found for that number.' };
     if (action === 'load') { await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('dialing','dry_run')").bind(o.id).run(); return { now_ist: nowIst(), outreach: o }; }
-    if (action === 'connect_tenant') { await env.DB.prepare("UPDATE outreach SET status='transferred' WHERE id=?").bind(o.id).run(); return { forward_to: o.tenant_phone }; }
     await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(summary || '', o.id).run();
     return { ok: true };
   });
 
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
-    visit_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(),
+    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
-  }, async ({ visit_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
+  }, async ({ visit_id, outreach_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
+    if (outreach_id) {
+      const outreach = await getOutreach(env, { outreach_id });
+      if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit });
+      visit_id ||= outreach?.visit_id;
+    }
+    if (!visit_id) return { error: 'visit_id or valid outreach_id required' };
     const r = await applyOwnerResponse(env, visit_id, outcome, details, proposed_time);
     if (!r.error && (quoted_rent || quoted_deposit)) {
       const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first();
