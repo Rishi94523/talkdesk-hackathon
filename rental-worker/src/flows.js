@@ -122,7 +122,7 @@ export async function applyOwnerResponse(env, visitId, outcome, text, proposed_t
   if (proposed_time && !isNaN(new Date(proposed_time))) newTime = new Date(proposed_time).toISOString();
   await env.DB.prepare('UPDATE visits SET status=?, requested_time=COALESCE(?,requested_time), notes=COALESCE(notes||char(10),\'\')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .bind(status, status === 'owner_proposed_time' ? newTime : null, 'Owner: ' + (text || outcome) + (newTime ? ` (proposed ${newTime})` : ''), visitId).run();
-  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind LIKE 'owner%' AND status IN ('dialing','dry_run','in_progress')").bind(`Owner said ${outcome}: ${text || ''}`.slice(0, 500), visitId).run();
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind='owner_ai' AND purpose LIKE 'Viewing request for listing %' AND status IN ('initiating','dialing','dry_run','in_progress')").bind(`Owner said ${outcome}: ${text || ''}`.slice(0, 500), visitId).run();
   const listing = await getListing(env, v.listing_id);
   const place = listing ? `${listing.bhk} BHK in ${listing.locality}` : v.listing_id;
   const when = fmtTime(newTime || v.requested_time);
