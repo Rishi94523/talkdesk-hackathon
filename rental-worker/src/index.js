@@ -122,7 +122,12 @@ function makeServer(env) {
       return scheduleVisit(env, a);
     }
     if (!visit_id) return { error: 'visit_id required' };
-    if (action === 'connect_owner') return { call: await callOwner(env, visit_id, 'owner_bridge'), say: 'Tell the caller their phone will ring shortly with the owner on the line, then end this call.' };
+    if (action === 'connect_owner') {
+      const call = await callOwner(env, visit_id, 'owner_bridge');
+      return { call, say: call.status === 'dialing'
+        ? 'The owner call was initiated; the connection is not confirmed yet.'
+        : 'The owner call was not initiated. Keep the request pending and do not promise a callback.' };
+    }
     if (action === 'status') return { visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() };
     if (action === 'accept_owner_time') return confirmProposedTime(env, visit_id);
     if (action === 'demo_owner_reply') return applyOwnerResponse(env, visit_id, parseReply(text), text);
