@@ -36,24 +36,31 @@ async function startFlow(env, flowId, args) {
  * kind: owner_ai (AI agent talks to owner) | owner_bridge (owner is called, then connected to the tenant) | tenant_ai (AI agent talks to tenant)
  */
 export async function placeCall(env, { kind, to, tenant_phone = null, owner_phone = null, visit_id = null, alert_id = null, purpose, briefing = {} }) {
-  const ins = await env.DB.prepare('INSERT INTO outreach(kind,to_phone,tenant_phone,owner_phone,visit_id,alert_id,purpose,briefing) VALUES(?,?,?,?,?,?,?,?)')
-    .bind(kind, to, tenant_phone, owner_phone, visit_id, alert_id, purpose, JSON.stringify(briefing)).run();
-  const id = ins.meta.last_row_id;
   const flowId = env[FLOW_ENV[kind]];
+  const ready = !!(flowId && env.TALKDESK_CLIENT_ID);
+  const ins = await env.DB.prepare('INSERT INTO outreach(kind,to_phone,tenant_phone,owner_phone,visit_id,alert_id,purpose,briefing,status) VALUES(?,?,?,?,?,?,?,?,?)')
+    .bind(kind, to, tenant_phone, owner_phone, visit_id, alert_id, purpose, JSON.stringify(briefing), ready ? 'initiating' : 'dry_run').run();
+  const id = ins.meta.last_row_id;
   let status = 'dry_run', interaction_id = null, error = null;
-  if (flowId && env.TALKDESK_CLIENT_ID) {
+  if (ready) {
     try {
       const res = await startFlow(env, flowId, { to_number: to, tenant_number: tenant_phone, owner_number: owner_phone, outreach_id: id, intro: briefing.spoken_intro || purpose });
       status = res.ok ? 'dialing' : 'failed'; interaction_id = res.id || null; error = res.error || null;
     } catch (e) { status = 'failed'; error = e.message; }
   }
-  await env.DB.prepare('UPDATE outreach SET status=?, interaction_id=?, error=? WHERE id=?').bind(status, interaction_id, error, id).run();
+  await env.DB.prepare("UPDATE outreach SET status=CASE WHEN status IN ('in_progress','completed') AND ?='dialing' THEN status ELSE ? END, interaction_id=?, error=? WHERE id=?").bind(status, status, interaction_id, error, id).run();
   return { outreach_id: id, kind, to, status, ...(error ? { error } : {}), ...(status === 'dry_run' ? { note: `Talkdesk flow for ${kind} not configured (${FLOW_ENV[kind]}); call recorded, not placed.` } : {}) };
 }
 
-export async function getOutreach(env, { outreach_id, phone }) {
-  const r = outreach_id
-    ? await env.DB.prepare('SELECT * FROM outreach WHERE id=?').bind(outreach_id).first()
-    : await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND status IN ('dialing','dry_run','in_progress') ORDER BY id DESC LIMIT 1").bind(phone).first();
+export async function getOutreach(env, { outreach_id, phone, kind, interaction_id }) {
+  let r;
+  if (outreach_id) r = await env.DB.prepare('SELECT * FROM outreach WHERE id=?').bind(outreach_id).first();
+  else if (interaction_id) r = await env.DB.prepare('SELECT * FROM outreach WHERE interaction_id=?').bind(interaction_id).first();
+  else if (phone && ['owner_ai', 'tenant_ai'].includes(kind)) {
+    // A destination number is only a demo routing hint, not proof of identity. Refuse
+    // ambiguous, stale and dry-run records instead of selecting an arbitrary caller.
+    const rows = await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind=? AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone, kind).all();
+    if (rows.results.length === 1) r = rows.results[0];
+  }
   return r ? { ...r, briefing: j(r.briefing) } : null;
 }

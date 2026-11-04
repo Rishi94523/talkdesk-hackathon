@@ -150,13 +150,14 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- outbound-call agents
-  tool('call_context', 'For outbound call agents: load the briefing using outreach_id, or mark the outreach complete with a summary.', {
+  tool('call_context', 'For outbound call agents: load the briefing by outreach_id or interaction_id. For demo calls only, phone and call_role can locate exactly one recent active outreach. Phone is not identity authentication. Complete an outreach with its ID and summary.', {
     action: z.enum(['load', 'complete']).optional(),
-    phone: z.string().max(20).optional(), outreach_id: z.number().int().optional(), summary: z.string().max(600).optional(),
-  }, async ({ action, phone: p, outreach_id, summary }) => {
-    const o = await getOutreach(env, { outreach_id, phone: p ? normPhone(p) : null });
+    phone: z.string().max(20).optional(), outreach_id: z.number().int().optional(), interaction_id: z.string().max(120).optional(), call_role: z.enum(['owner_ai', 'tenant_ai']).optional(), summary: z.string().max(600).optional(),
+  }, async ({ action, phone: p, outreach_id, interaction_id, call_role, summary }) => {
+    const o = await getOutreach(env, { outreach_id, interaction_id, phone: p ? normPhone(p) : null, kind: call_role });
     if (!o) return { error: 'No active outbound call found for that number.' };
-    if (action === 'load') { await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('dialing','dry_run')").bind(o.id).run(); return { now_ist: nowIst(), outreach: o }; }
+    if (call_role && o.kind !== call_role) return { error: 'Outreach role does not match this agent.' };
+    if (action === 'load') { await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('initiating','dialing')").bind(o.id).run(); return { now_ist: nowIst(), outreach: o }; }
     await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(summary || '', o.id).run();
     return { ok: true };
   });
