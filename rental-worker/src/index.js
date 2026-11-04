@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { reply, fail, normPhone, j } from './util.js';
 import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES } from './sources.js';
 import { getOutreach } from './notify.js';
+import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
+import { registerLegacy } from './legacy.js';
 import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits } from './flows.js';
 
 // Talkdesk orchestrations allow 5 skills and each MCP skill binds ONE tool, so the server exposes a few
@@ -16,36 +18,39 @@ const opt = z.string().max(100).optional();
 
 function makeServer(env) {
   const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
-  const tool = (name, description, shape, fn) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
+  const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['action', 'phone'], call_context: ['action'], owner_response: ['visit_id', 'outcome'] };
+  const tool = (name, description, shape, fn, required = REQ[name] || []) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
+    const missing = required.filter(k => a[k] == null || a[k] === '');
+    if (missing.length) return fail('Missing required: ' + missing.join(', '));
     try { return reply(await fn(a)); } catch (e) { return fail('Tool failed: ' + (e.message || 'unknown').slice(0, 200)); }
   });
 
   // ---------------------------------------------------------------- tenant
-  tool('tenant', `Tenant memory. Actions:
-- get: profile, wishlist, visits, deals and alerts for a caller (also returns current IST time). Call at the start of every conversation with the caller's phone (Caller ID).
-- save_preferences: store/merge name and preferences (locality, bhk, max_rent, max_deposit, amenities, furnishing, move_in_date, pets, notes).
-- wishlist_add (listing_id, note) / wishlist_list.
-- alert_create: watch for NEW listings matching the saved/passed criteria; on new matches our AI agent phones the tenant for a two-way conversation. Requires consent=true.
-- alert_list / alert_cancel (alert_id).`, {
-    action: z.enum(['get', 'save_preferences', 'wishlist_add', 'wishlist_list', 'alert_create', 'alert_list', 'alert_cancel']),
-    phone: z.string().min(8).max(20).describe('Tenant phone number (Caller ID)'),
+  tool('tenant', 'Tenant memory keyed by phone. Actions: get (call first), save_preferences, record_property (when actually discussed, with status and reason), save_summary (at end of every call, with session_id), wishlist_add, wishlist_list, alert_create, alert_list, alert_cancel. Never claim a visit happened unless the tenant says so.', {
+    action: z.enum(['get', 'save_preferences', 'record_property', 'save_summary', 'search_history', 'wishlist_add', 'wishlist_list', 'alert_create', 'alert_list', 'alert_cancel']).optional(),
+    phone: z.string().max(20).optional().describe('Tenant phone number (Caller ID)'),
     name: z.string().max(80).optional(), locality: opt, bhk: z.number().int().min(1).max(5).optional(),
     max_rent: z.number().int().positive().optional(), max_deposit: z.number().int().positive().optional(),
     amenities: z.array(z.string().max(30)).max(8).optional(), furnishing: z.enum(['none', 'semi', 'full']).optional(),
     move_in_date: opt, pets: z.boolean().optional(), notes: z.string().max(500).optional(),
     listing_id: z.string().max(60).optional(), note: z.string().max(200).optional(),
-    alert_id: z.number().int().optional(), consent: z.boolean().optional(),
-  }, async ({ action, phone: p, listing_id, note, alert_id, consent, name, ...prefs }) => {
+    alert_id: z.number().int().optional(), consent: z.boolean().optional(), session_id: z.string().max(120).optional(), summary: z.string().max(1600).optional(),
+    property_status: z.enum(['discussed','shortlisted','rejected','visit_requested','visit_confirmed','visited','liked','unavailable']).optional(), event_key: z.string().max(120).optional(), history_query: z.string().max(100).optional(),
+  }, async ({ action, phone: p, listing_id, note, alert_id, consent, name, session_id, summary, property_status, event_key, history_query, ...prefs }) => {
     const n = normPhone(p);
     if (action === 'get') {
       const q = sql => env.DB.prepare(sql).bind(n).all().then(r => r.results);
       const [wishlist, visits, deals, alerts] = await Promise.all([q('SELECT listing_id,note FROM wishlist WHERE phone=?'), q('SELECT id,listing_id,owner_name,requested_time,status FROM visits WHERE phone=? ORDER BY id DESC LIMIT 10'), q('SELECT listing_id,stage,terms FROM deals WHERE phone=?'), q('SELECT id,criteria,active FROM alerts WHERE phone=? AND active=1')]);
-      return { now_ist: nowIst(), now_iso: new Date().toISOString(), profile: await getProfile(env, n), wishlist, visits, deals: deals.map(d => ({ ...d, terms: j(d.terms) })), alerts: alerts.map(a => ({ ...a, criteria: j(a.criteria) })) };
+      return { now_ist: nowIst(), now_iso: new Date().toISOString(), profile: await getProfile(env, n), wishlist: wishlist.slice(0,10), visits, deals: deals.slice(0,10).map(d => ({ ...d, terms: j(d.terms) })), alerts, memory: await getMemory(env, n) };
     }
+    if (action === 'save_summary') return saveSummary(env, n, session_id, summary);
+    if (action === 'record_property') return recordProperty(env, n, listing_id, property_status, note, session_id, event_key);
+    if (action === 'search_history') return searchMemory(env, n, history_query, listing_id);
     if (action === 'save_preferences') return { profile: await saveProfile(env, n, name, prefs, null) };
     if (action === 'wishlist_add') {
       if (!listing_id || !(await getListing(env, listing_id))) return { error: 'Unknown listing_id; search first.' };
       await env.DB.prepare('INSERT INTO wishlist(phone,listing_id,note) VALUES(?,?,?) ON CONFLICT(phone,listing_id) DO UPDATE SET note=excluded.note').bind(n, listing_id, note ?? null).run();
+      await recordProperty(env, n, listing_id, 'shortlisted', note, session_id, event_key);
       await updateDeal(env, n, listing_id, null, {});
       return { ok: true };
     }
@@ -65,31 +70,24 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- listings
-  tool('listings', `Rental listings. Actions:
-- search: live NoBroker listings (via API.SH) ranked against criteria (locality, bhk, max_rent, max_deposit, amenities, furnishing). Returns listing ids and match_score. Owner contacts are not provided by the source.
-- details: full record for listing_id.
-- check_new: run the new-listing alert check now (normally automatic).`, {
-    action: z.enum(['search', 'details', 'check_new']),
+  tool('listings', 'Live rental listings (NoBroker via API.SH). action: search (locality, bhk, max_rent, max_deposit, amenities, furnishing; returns ids + match_score), details (listing_id), check_new (run new-listing alert check now).', {
+    action: z.enum(['search', 'details', 'check_new']).optional(),
     locality: opt, bhk: z.number().int().min(1).max(5).optional(), max_rent: z.number().int().positive().optional(),
     max_deposit: z.number().int().positive().optional(), amenities: z.array(z.string().max(30)).max(8).optional(),
     furnishing: z.enum(['none', 'semi', 'full']).optional(), include_demo: z.boolean().optional(),
-    limit: z.number().int().min(1).max(10).optional(), listing_id: z.string().max(60).optional(),
-  }, async ({ action, include_demo, limit = 5, listing_id, ...c }) => {
+    limit: z.number().int().min(1).max(10).optional(), listing_id: z.string().max(60).optional(), phone: z.string().max(20).optional(), include_previously_discussed: z.boolean().optional(),
+  }, async ({ action, include_demo, limit = 5, listing_id, phone: p, include_previously_discussed, ...c }) => {
     if (action === 'details') return { listing: await getListing(env, listing_id) };
     if (action === 'check_new') return { report: await runAlerts(env) };
     const r = await findListings(env, c, { includeDemo: !!include_demo });
-    return { total_on_portal: r.total_on_portal, warning: r.warning, results: r.results.slice(0, limit).map(({ lat, lon, image, amenities, street, updated, ...x }) => x) };
+    const seen = p ? await previouslyDiscussed(env, normPhone(p), r.results.map(x => x.id)) : new Set();
+    const candidates = include_previously_discussed ? r.results : r.results.filter(x => !seen.has(x.id));
+    return { total_on_portal: r.total_on_portal, warning: r.warning, previously_discussed_excluded: include_previously_discussed ? 0 : seen.size, results: candidates.slice(0, limit).map(({ lat, lon, image, amenities, street, updated, ...x }) => ({ ...x, previously_discussed: seen.has(x.id) })) };
   });
 
   // ---------------------------------------------------------------- research
-  tool('research', `Research & negotiation specialist (runs Firecrawl + Parallel searches concurrently). Actions:
-- locality: resident reviews (Reddit/forums), safety, rental scams/shady practices, pricing, schools, amenities for a locality (optionally limit topics).
-- dossier: for listing_id, in parallel: market comparison + locality research + negotiation plan. Use before a visit or negotiation.
-- market: rent/deposit statistics for locality+bhk from live comparables.
-- negotiate: negotiation plan for listing_id (opening offer, target, walk-away, deposit plan, leverage, owner script). Pass red_flags from research.
-- web: free-form web search (query). - read_page: read a URL.
-Summarise for the caller in plain speech; say opinions online are unverified.`, {
-    action: z.enum(['locality', 'dossier', 'market', 'negotiate', 'web', 'read_page']),
+  tool('research', 'Research + negotiation via parallel Firecrawl/Parallel web search. action: locality (Reddit/forum reviews, safety, scams, pricing, schools, amenities), dossier (listing_id: all of it + negotiation plan), market, negotiate (listing_id), web (query), read_page (url).', {
+    action: z.enum(['locality', 'dossier', 'market', 'negotiate', 'web', 'read_page']).optional(),
     locality: opt, bhk: z.number().int().min(1).max(5).optional(), topics: z.array(z.enum(TOPIC_NAMES)).max(6).optional(),
     listing_id: z.string().max(60).optional(), max_rent: z.number().int().positive().optional(),
     max_deposit_months: z.number().min(1).max(12).optional(), red_flags: z.array(z.string().max(200)).max(6).optional(),
@@ -106,15 +104,8 @@ Summarise for the caller in plain speech; say opinions online are unverified.`, 
   });
 
   // ---------------------------------------------------------------- visits
-  tool('visits', `Viewing coordination through outbound Talkdesk calls. Actions:
-- schedule: phone, listing_id, owner_phone, owner_name, requested_time (ISO 8601 with +05:30) and mode:
-    "ai_call" (default) = our Owner-Liaison AI agent phones the owner on a separate call, confirms/renegotiates the time, then our agent calls the tenant back with the result;
-    "direct_connect" = the owner is phoned and connected straight to the tenant's phone to talk directly (end your call first so the line is free).
-  Always ask the tenant which mode they want.
-- connect_owner: visit_id; connect tenant and owner directly now (same as direct_connect for an existing visit).
-- status: visit_id. - accept_owner_time: visit_id; tenant accepts the owner's proposed time.
-- demo_owner_reply: visit_id, text; DEMO ONLY, simulates the owner's answer.`, {
-    action: z.enum(['schedule', 'connect_owner', 'status', 'accept_owner_time', 'demo_owner_reply']),
+  tool('visits', 'Book viewings by outbound Talkdesk call. action: schedule (phone, listing_id, owner_phone, owner_name, requested_time ISO+05:30, mode ai_call = our AI calls owner separately / direct_connect = owner connected to tenant), connect_owner, status, accept_owner_time, demo_owner_reply (visit_id).', {
+    action: z.enum(['schedule', 'connect_owner', 'status', 'accept_owner_time', 'demo_owner_reply']).optional(),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), owner_phone: z.string().max(20).optional(),
     owner_name: z.string().max(80).optional(), requested_time: z.string().max(40).optional(),
     mode: z.enum(['ai_call', 'direct_connect']).optional(), notes: z.string().max(300).optional(),
@@ -132,12 +123,9 @@ Summarise for the caller in plain speech; say opinions online are unverified.`, 
   });
 
   // ---------------------------------------------------------------- deal
-  tool('deal', `Deal tracking and closing. Actions:
-- update: phone, listing_id, stage (${STAGES.join(', ')}) and terms (agreed_rent, agreed_deposit, move_in...).
-- draft_agreement: phone, listing_id, landlord_name, tenant_name, property_address, rent, deposit, start_date (YYYY-MM-DD), optional months/maintenance/lock_in_months/notice_months/escalation_pct/extra_terms. Draft only, not legal advice.
-- call_tenant_later: phone, purpose; schedule an outbound AI follow-up call to the tenant.`, {
-    action: z.enum(['update', 'draft_agreement', 'call_tenant_later']),
-    phone: z.string().min(8).max(20), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
+  tool('deal', 'Deal tracking/closing. action: update (phone, listing_id, stage, terms), draft_agreement (landlord_name, tenant_name, property_address, rent, deposit, start_date; draft, not legal advice), call_tenant_later (phone, purpose: schedule an AI follow-up call).', {
+    action: z.enum(['update', 'draft_agreement', 'call_tenant_later']).optional(),
+    phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
     terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
     landlord_name: z.string().max(100).optional(), tenant_name: z.string().max(100).optional(), property_address: z.string().max(300).optional(),
     rent: z.number().int().positive().optional(), deposit: z.number().int().min(0).optional(), start_date: z.string().max(20).optional(),
@@ -156,11 +144,8 @@ Summarise for the caller in plain speech; say opinions online are unverified.`, 
   });
 
   // ---------------------------------------------------------------- outbound-call agents
-  tool('call_context', `For OUTBOUND call agents. Actions:
-- load: FIRST thing on every outbound call. Pass the number you are speaking with (Caller ID) or outreach_id. Returns who you called, why, the briefing and what to do. Also returns current IST time.
-- connect_tenant: the OWNER asked to speak to the tenant directly on this call; returns the tenant number. Then tell the owner you are connecting them and end with the transfer/escalation exit so the flow forwards the call.
-- complete: outreach_id, summary; store a short summary at the end of the call.`, {
-    action: z.enum(['load', 'connect_tenant', 'complete']),
+  tool('call_context', 'For OUTBOUND call agents. action: load (FIRST step; pass phone = Caller ID; returns who/why/briefing), connect_tenant (owner wants the tenant on this call; returns number, then use the transfer exit), complete (outreach_id, summary).', {
+    action: z.enum(['load', 'connect_tenant', 'complete']).optional(),
     phone: z.string().max(20).optional(), outreach_id: z.number().int().optional(), summary: z.string().max(600).optional(),
   }, async ({ action, phone: p, outreach_id, summary }) => {
     const o = await getOutreach(env, { outreach_id, phone: p ? normPhone(p) : null });
@@ -171,8 +156,8 @@ Summarise for the caller in plain speech; say opinions online are unverified.`, 
     return { ok: true };
   });
 
-  tool('owner_response', 'Owner-Liaison agent: record the owner\'s answer to the viewing request. outcome yes / no / reschedule (with proposed_time ISO 8601 +05:30) / other. Optionally the rent/deposit the owner quoted. The tenant is then called back automatically by our tenant agent.', {
-    visit_id: z.number().int(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']), details: z.string().max(400).optional(),
+  tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
+    visit_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
   }, async ({ visit_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
     const r = await applyOwnerResponse(env, visit_id, outcome, details, proposed_time);
@@ -182,6 +167,8 @@ Summarise for the caller in plain speech; say opinions online are unverified.`, 
     }
     return r;
   });
+  // Keep the published V1 Talkdesk orchestration operational until its replacement is tested.
+  registerLegacy(s, env);
   return s;
 }
 

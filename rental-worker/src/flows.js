@@ -1,6 +1,7 @@
 import { placeCall } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
 import { j, normPhone } from './util.js';
+import { getMemory, recordProperty } from './memory.js';
 
 const fmtTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const inr = n => '₹' + Number(n).toLocaleString('en-IN');
@@ -33,10 +34,11 @@ export async function scheduleVisit(env, a) {
   const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes) VALUES(?,?,?,?,?,?,?)')
     .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null).run();
   const id = ins.meta.last_row_id;
+  await recordProperty(env, phone, a.listing_id, 'visit_requested', null, null, `visit:${id}`);
   const call = await callOwner(env, id, mode);
   return {
     visit_id: id, status: 'pending', call,
-    strategy: mode === 'owner_ai'
+    strategy: call.status !== 'dialing' ? 'The request was saved, but no owner call has been confirmed as started.' : mode === 'owner_ai'
       ? `Our owner-liaison AI agent is calling ${a.owner_name || 'the owner'} on a separate call to confirm ${fmtTime(when)} (or agree another time). The tenant gets a call back with the result. If the owner asks to speak to the tenant, the call is forwarded to the tenant.`
       : `Calling the owner now; when they answer they hear a short introduction and are connected straight to the tenant's phone. End this call so the tenant's line is free.`,
   };
@@ -64,11 +66,12 @@ export async function callOwner(env, visitId, mode = 'owner_ai') {
 // Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.
 export async function callTenant(env, { phone, purpose, details = {}, visit_id = null, alert_id = null }) {
   const prof = await getProfile(env, phone);
+  const memory = await getMemory(env, phone);
   return placeCall(env, {
     kind: 'tenant_ai', to: phone, tenant_phone: phone, visit_id, alert_id, purpose,
     briefing: {
       role: 'You are calling the TENANT (your client) back. This is a two-way conversation, not an announcement.',
-      purpose, ...details, tenant_profile: prof,
+      purpose, ...details, tenant_profile: prof, memory,
       spoken_intro: `Hi${prof?.name ? ' ' + prof.name : ''}, this is your rental assistant calling with an update.`,
       you_can: ['Describe the listings or update and answer questions', 'tenant action=wishlist_add', 'visits action=schedule (ask preferred time and ai_call vs direct_connect) or accept_owner_time', 'tenant action=save_preferences if preferences changed', 'research action=locality / negotiate on request', 'tenant action=alert_cancel if they want no more calls'],
       when_done: 'Call call_context action=complete with a short summary.',
@@ -93,6 +96,7 @@ export async function applyOwnerResponse(env, visitId, outcome, text, proposed_t
     : status === 'owner_proposed_time' ? `The owner proposed ${when} instead for the ${place}; ask the tenant if that works.`
     : `The owner said something about the ${place} that needs the tenant's input: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
+  if (status === 'confirmed') await recordProperty(env, v.phone, v.listing_id, 'visit_confirmed', text, null, `visit-confirmed:${visitId}`);
   const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Offer a property dossier / negotiation tips before the visit.' : 'Ask for a new time (or accept the proposed one): visits action=schedule or accept_owner_time.' } }) : null;
   return { visit_id: visitId, status, update, tenant_call };
 }
@@ -181,15 +185,21 @@ export async function runAlerts(env) {
   const report = [];
   for (const al of alerts) {
     const c = j(al.criteria);
-    const { results } = await findListings(env, c);
+    const { results, warning } = await findListings(env, c);
+    if (warning) { report.push({ alert: al.id, error: warning }); continue; }
     const seen = new Set((await env.DB.prepare('SELECT listing_id FROM alert_seen WHERE alert_id=?').bind(al.id).all()).results.map(r => r.listing_id));
     const fresh = results.filter(l => !seen.has(l.id) && l.match_score >= 70);
-    if (results.length) await env.DB.batch(results.map(l => env.DB.prepare('INSERT OR IGNORE INTO alert_seen(alert_id,listing_id) VALUES(?,?)').bind(al.id, l.id)));
     const baseline = !al.last_run;
-    await env.DB.prepare('UPDATE alerts SET last_run=CURRENT_TIMESTAMP WHERE id=?').bind(al.id).run();
-    if (baseline || !fresh.length) { report.push({ alert: al.id, new: baseline ? 0 : fresh.length, baseline }); continue; }
+    if (baseline) {
+      if (results.length) await env.DB.batch(results.map(l => env.DB.prepare('INSERT OR IGNORE INTO alert_seen(alert_id,listing_id) VALUES(?,?)').bind(al.id, l.id)));
+      await env.DB.prepare('UPDATE alerts SET last_run=CURRENT_TIMESTAMP WHERE id=?').bind(al.id).run();
+      report.push({ alert: al.id, new: 0, baseline }); continue;
+    }
+    if (!fresh.length) { report.push({ alert: al.id, new: 0 }); continue; }
+    if (!env.TD_FLOW_TENANT_AI || !env.TALKDESK_CLIENT_ID) { report.push({ alert: al.id, error: 'Tenant callback flow is not configured; no call placed.' }); continue; }
     const top = fresh.slice(0, 3).map(({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }) => ({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }));
     const call = await callTenant(env, { phone: al.phone, alert_id: al.id, purpose: `New listing alert: ${fresh.length} new match${fresh.length > 1 ? 'es' : ''} for the tenant's saved search.`, details: { new_listings: top, criteria: c, next: 'Walk through the listings one by one, ask which they like, offer to add to wishlist, research the area, or schedule a visit. Ask if their preferences changed.' } });
+    if (call.status === 'dialing') await env.DB.batch(top.map(l => env.DB.prepare('INSERT OR IGNORE INTO alert_seen(alert_id,listing_id) VALUES(?,?)').bind(al.id, l.id)));
     report.push({ alert: al.id, new: fresh.length, call });
   }
   return report;

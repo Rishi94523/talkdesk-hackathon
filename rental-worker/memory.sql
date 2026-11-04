@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS conversation_summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, session_id TEXT NOT NULL, summary TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(phone, session_id));
+CREATE INDEX IF NOT EXISTS idx_memory_phone ON conversation_summaries(phone, updated_at DESC);
+CREATE TABLE IF NOT EXISTS property_history (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, listing_id TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, session_id TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(phone, listing_id));
+CREATE INDEX IF NOT EXISTS idx_property_history_phone ON property_history(phone, updated_at DESC);
+CREATE TABLE IF NOT EXISTS property_events (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, listing_id TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, session_id TEXT, event_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(phone, event_key));
