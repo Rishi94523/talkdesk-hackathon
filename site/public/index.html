@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MergeConflicts Rentals</title>
+<meta name="description" content="An AI rental concierge for Bengaluru: live listings, locality research, owner calls, negotiation and a draft agreement, all from one phone call.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23c2410c'/><path d='M8 16l8-7 8 7v8h-5v-5h-6v5H8z' fill='white'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top" aria-label="MergeConflicts Rentals home">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8"/><path d="M8 16l8-7 8 7v8h-5v-5h-6v5H8z"/></svg></span>
+      <span>MergeConflicts <em>Rentals</em></span>
+    </a>
+    <nav class="links" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#listings">Listings</a>
+      <a href="#agents">Agents</a>
+      <a href="#safety">Safety</a>
+    </nav>
+    <a class="btn btn-small call-link" href="#listings" data-call>Browse listings</a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero wrap">
+    <div class="hero-copy">
+      <p class="eyebrow">AI rental concierge · Bengaluru</p>
+      <h1>Find your next home with <span class="accent">one phone call.</span></h1>
+      <p class="lede">Tell our voice agent what you need. It searches live listings, researches the neighbourhood, calls the owner to set up a viewing, helps you negotiate and drafts the rental agreement.</p>
+      <div class="cta">
+        <a class="btn" href="#listings" data-call-primary>Browse live listings</a>
+        <a class="btn btn-ghost" href="#how">See how it works</a>
+      </div>
+      <p class="phone-line" data-phone-line hidden>Concierge line: <a data-phone></a></p>
+    </div>
+
+    <figure class="call-card" aria-label="Example conversation with the concierge">
+      <div class="call-head">
+        <span class="pulse" aria-hidden="true"></span>
+        <div><strong>Rental Concierge</strong><span>On call · 02:41</span></div>
+      </div>
+      <ol class="chat">
+        <li class="me">I need a 2 BHK in Whitefield under ₹30,000. I have a car.</li>
+        <li class="bot">I found 6 matches with car parking. The best is 900 sq ft in Hagadur at ₹24,000, deposit ₹72,000.</li>
+        <li class="me">Is the area safe? Any scams I should know about?</li>
+        <li class="bot">Residents rate it well. Watch for "token advance" requests before a visit; never pay before seeing the flat.</li>
+        <li class="me">Book a visit for Saturday at 11.</li>
+        <li class="bot">I'll call the owner now and ring you back once they confirm.</li>
+      </ol>
+      <figcaption>Illustrative conversation</figcaption>
+    </figure>
+  </section>
+
+  <section class="stats" aria-label="Live numbers">
+    <div class="wrap stats-grid">
+      <div><b data-stat="listings">–</b><span>listings tracked</span></div>
+      <div><b data-stat="visits">–</b><span>viewings arranged</span></div>
+      <div><b data-stat="alerts">–</b><span>active listing alerts</span></div>
+      <div><b data-stat="deals">–</b><span>deals in progress</span></div>
+    </div>
+  </section>
+
+  <section id="how" class="wrap section">
+    <p class="eyebrow">How it works</p>
+    <h2>From "I need a flat" to a signed draft</h2>
+    <ol class="steps">
+      <li><span class="n">1</span><h3>Tell us what you need</h3><p>Budget, deposit, BHK, area, parking, pets, move-in date. The concierge remembers you next time you call.</p></li>
+      <li><span class="n">2</span><h3>Live search</h3><p>Listings come from NoBroker in real time and are ranked against your preferences with a match score.</p></li>
+      <li><span class="n">3</span><h3>Neighbourhood research</h3><p>Resident reviews, safety, known rental scams, schools and amenities, gathered from the web in parallel.</p></li>
+      <li><span class="n">4</span><h3>Viewing with the owner</h3><p>Our owner-liaison agent phones the owner to confirm a time, or connects you to them directly.</p></li>
+      <li><span class="n">5</span><h3>Negotiation plan</h3><p>Market comparison, an opening offer, a target and a walk-away price, plus a script for the conversation.</p></li>
+      <li><span class="n">6</span><h3>Draft agreement</h3><p>Agreed terms become a draft 11-month rental agreement for both sides to review, stamp and sign.</p></li>
+    </ol>
+  </section>
+
+  <section id="listings" class="section listings-section">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Live listings</p>
+          <h2>What the concierge has found</h2>
+          <p class="muted" data-listing-meta>Loading listings…</p>
+        </div>
+      </div>
+
+      <form class="filters" data-filters aria-label="Filter listings">
+        <label>Area
+          <select name="locality"><option value="">All areas</option></select>
+        </label>
+        <label>BHK
+          <select name="bhk"><option value="">Any</option><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </label>
+        <label>Max rent (₹)
+          <input name="max_rent" type="number" inputmode="numeric" min="0" step="1000" placeholder="e.g. 30000">
+        </label>
+        <label>Furnishing
+          <select name="furnishing"><option value="">Any</option><option value="full">Full</option><option value="semi">Semi</option><option value="none">Unfurnished</option></select>
+        </label>
+        <label>Sort
+          <select name="sort"><option value="rent_asc">Rent: low to high</option><option value="rent_desc">Rent: high to low</option><option value="size_desc">Largest first</option><option value="recent">Recently updated</option></select>
+        </label>
+      </form>
+
+      <div class="grid" data-grid aria-live="polite"></div>
+      <p class="fineprint">Listings come from a third-party portal and may be out of date. Owner contact details are not published. Always visit and verify ownership before paying anything.</p>
+    </div>
+  </section>
+
+  <section id="agents" class="wrap section">
+    <p class="eyebrow">Built on Talkdesk</p>
+    <h2>Three voice agents, one shared memory</h2>
+    <div class="agents">
+      <article>
+        <span class="tag in">Inbound</span>
+        <h3>Concierge</h3>
+        <p>Answers your call, learns your preferences, searches, researches, books viewings and tracks the deal.</p>
+        <ul class="chips"><li>tenant</li><li>listings</li><li>research</li><li>visits</li><li>deal</li></ul>
+      </article>
+      <article>
+        <span class="tag out">Outbound</span>
+        <h3>Owner liaison</h3>
+        <p>Calls the property owner, confirms or reschedules the viewing and notes the rent and deposit they quote.</p>
+        <ul class="chips"><li>call_context</li><li>owner_response</li><li>listings</li></ul>
+      </article>
+      <article>
+        <span class="tag out">Outbound</span>
+        <h3>Tenant callback</h3>
+        <p>Rings you back with the owner's answer, and calls when a new listing matches one of your alerts.</p>
+        <ul class="chips"><li>call_context</li><li>tenant</li><li>visits</li><li>research</li></ul>
+      </article>
+    </div>
+    <p class="muted center">All three agents use one MCP server on Cloudflare Workers, with a shared D1 database.</p>
+  </section>
+
+  <section id="safety" class="section safety-section">
+    <div class="wrap safety">
+      <div>
+        <p class="eyebrow">Safety first</p>
+        <h2>What we will never do</h2>
+      </div>
+      <ul class="checks">
+        <li><b>Never take money.</b> We don't collect deposits, token advances or fees.</li>
+        <li><b>Never invent a listing.</b> Every listing links to its source so you can check it.</li>
+        <li><b>Never call without consent.</b> Alert calls only start after you agree to them.</li>
+        <li><b>Never give legal advice.</b> The agreement is a draft for both parties to review.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <span>MergeConflicts Rentals · Talkdesk hackathon 2026</span>
+    <span class="muted">Demo project. Not a real-estate broker.</span>
+  </div>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>
