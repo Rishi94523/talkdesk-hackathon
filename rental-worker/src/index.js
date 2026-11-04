@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 import { reply, fail, normPhone, j } from './util.js';
-import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES } from './sources.js';
+import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES, briefOf, factsOf, webLeadListing, cacheListings } from './sources.js';
 import { getOutreach, dispatchQueued } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
 import { registerLegacy } from './legacy.js';
@@ -70,23 +70,39 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- listings
-  tool('listings', 'Live rental listings (NoBroker via API.SH). action: search (locality, bhk, max_rent, max_deposit, amenities, furnishing; returns ids + match_score), details (listing_id), check_new (run new-listing alert check now).', {
+  tool('listings', 'Rental listings. action: search (locality, bhk, max_rent, max_deposit, amenities, furnishing; offset for more) returns up to 5 short options with a one-line brief each: the fictional MergeConflicts showcase first, then NoBroker listings, then web leads. details (listing_id) returns full facts for one option. check_new runs the alert check.', {
     action: z.enum(['search', 'details', 'check_new']).optional(),
     locality: opt, bhk: z.number().int().min(1).max(5).optional(), max_rent: z.number().int().positive().optional(),
     max_deposit: z.number().int().positive().optional(), amenities: z.array(z.string().max(30)).max(8).optional(),
     furnishing: z.enum(['none', 'semi', 'full']).optional(), property_type: z.string().max(40).optional(), move_in_date: z.string().max(40).optional(), pets: z.boolean().optional(), requested_preferences: z.string().max(500).optional(), include_demo: z.boolean().optional(),
-    limit: z.number().int().min(1).max(10).optional(), listing_id: z.string().max(60).optional(), phone: z.string().max(20).optional(), include_previously_discussed: z.boolean().optional(),
-  }, async ({ action, include_demo, limit = 5, listing_id, phone: p, include_previously_discussed, ...c }) => {
-    if (action === 'details') return { listing: await getListing(env, listing_id) };
+    limit: z.number().int().min(1).max(10).optional(), offset: z.number().int().min(0).max(50).optional(), listing_id: z.string().max(60).optional(), phone: z.string().max(20).optional(), include_previously_discussed: z.boolean().optional(),
+  }, async ({ action, include_demo, limit = 5, offset = 0, listing_id, phone: p, include_previously_discussed, ...c }) => {
+    if (action === 'details') {
+      const listing = await getListing(env, listing_id);
+      if (!listing) return { error: 'Unknown listing_id; search first.' };
+      const { lat, lon, image, url, ...facts } = listing;
+      const text = listing.source === 'web' && url ? await scrapeMarkdown(env, url, 1500) : null;
+      return { listing: facts, ...(text ? { page_text: text } : {}), speak: 'Describe these facts conversationally; never read a URL aloud. For the showcase, mention once that it is a demo listing, then offer to arrange a viewing with the owner.' };
+    }
     if (action === 'check_new') return { report: await runAlerts(env) };
-    const query = `${c.bhk ? c.bhk + ' BHK ' : ''}apartment for rent ${c.locality || 'Bengaluru'} Bengaluru property owner contact`;
+    const query = `${c.bhk ? c.bhk + ' BHK ' : ''}flat for rent in ${c.locality || 'Bengaluru'} Bengaluru${c.max_rent ? ' under ' + c.max_rent : ''}`;
     const [r, fc, pa] = await Promise.all([
       findListings(env, c, { includeDemo: !!include_demo, includeShowcase: true }),
-      firecrawlSearch(env, query, 3), parallelSearch(env, query),
+      firecrawlSearch(env, query, 4), parallelSearch(env, query),
     ]);
     const seen = p ? await previouslyDiscussed(env, normPhone(p), r.results.map(x => x.id)) : new Set();
-    const candidates = include_previously_discussed ? r.results : r.results.filter(x => x.is_showcase || !seen.has(x.id));
-    return { total_on_portal: r.total_on_portal, warning: r.warning, previously_discussed_excluded: include_previously_discussed ? 0 : seen.size, results: candidates.slice(0, limit).map(({ lat, lon, image, street, updated, ...x }) => ({ ...x, previously_discussed: seen.has(x.id) })), web_candidates: [...fc, ...pa].filter(x => x.url).slice(0,6), web_notice: 'Web search results are leads, not confirmed listings or owner contacts. Do not infer a phone number from a generic search snippet.' };
+    const portal = include_previously_discussed ? r.results : r.results.filter(x => x.is_showcase || !seen.has(x.id));
+    const web = [...new Map([...fc, ...pa].filter(x => x.url && x.title).map(x => [x.url, webLeadListing(x)])).values()];
+    await cacheListings(env, web);
+    // Talkdesk can only pass fixed or variable-mapped inputs, so one search returns everything the
+    // conversation needs: 10 options with facts; the agent reads 5 now and keeps 5 for "more".
+    const showcase = portal.filter(x => x.is_showcase), rest = [...portal.filter(x => !x.is_showcase), ...web];
+    const all = [...showcase, ...rest].slice(offset, offset + Math.max(limit, 10));
+    const options = all.map((x, i) => ({ number: offset + i + 1, group: i < 5 ? 'read_now' : 'more', listing_id: x.id, source: x.is_showcase ? 'demo_showcase' : x.source, title: x.title, brief: briefOf(x), facts: factsOf(x), ...(x.mismatches?.length ? { mismatches: x.mismatches } : {}) }));
+    return {
+      options, ...(r.warning ? { warning: r.warning } : {}),
+      speak: 'Read the read_now options as a short numbered list using only each brief (option 1 is the MergeConflicts demo listing; say so once). Never read URLs. Ask whether any interests them or whether to keep searching. If they want more, read the more options; do not search again unless the criteria change. When they pick one, describe it in detail from its facts.',
+    };
   });
 
   // ---------------------------------------------------------------- research

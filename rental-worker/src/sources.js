@@ -19,7 +19,21 @@ export function showcaseListing(criteria = {}) {
   let hash = 2166136261;
   for (const ch of JSON.stringify(selected)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
   const amenities = [...new Set(['Balcony', 'lift', 'gym', 'swimming pool', 'covered parking', ...selected.amenities])];
-  return { id: `MC-SHOWCASE-${slug}-${(hash >>> 0).toString(36)}`, source: 'demo', is_showcase: true, title: 'MergeConflicts Garden Residences', locality: area, bhk: selected.bhk, rent: Math.min(45000, selected.max_rent || 45000), deposit: Math.min(180000, selected.max_deposit || 180000), furnishing: selected.furnishing || 'semi', property_type: selected.property_type || 'apartment', available_from: selected.move_in_date, pets_allowed: selected.pets, size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, amenities, features: amenities.join(', '), demo_requested_preferences: selected.requested_preferences, owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property. Its details are generated from the search preferences and do not describe a real property.' };
+  return { id: `MC-SHOWCASE-${slug}-${(hash >>> 0).toString(36)}`, source: 'demo', is_showcase: true, title: 'MergeConflicts Garden Residences', locality: area, bhk: selected.bhk, rent: Math.min(45000, selected.max_rent || 45000), deposit: Math.min(180000, selected.max_deposit || 180000), furnishing: selected.furnishing || 'semi', property_type: selected.property_type || 'apartment', available_from: selected.move_in_date, pets_allowed: selected.pets, size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, amenities, features: amenities.join(', '), demo_requested_preferences: selected.requested_preferences, owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property. Its details are generated from the search preferences and do not describe a real property.',
+    details: {
+      address: `Tower B, MergeConflicts Garden Residences, off the main road in ${area}, Bengaluru (fictional)`,
+      owner: 'Rishi D V, the owner, manages the flat directly (no broker, no brokerage fee).',
+      layout: `${selected.bhk} BHK, about 1,150 sq ft, 4th floor of 12, east-facing, ${selected.bhk} bathrooms, two balconies.`,
+      furnishing_items: (selected.furnishing || 'semi') === 'full' ? 'Fully furnished: beds, sofa, dining table, fridge, washing machine, TV, ACs in bedrooms.' : (selected.furnishing === 'none' ? 'Unfurnished: kitchen cabinets and lights only.' : 'Semi-furnished: modular kitchen, wardrobes, geysers, fans and lights.'),
+      maintenance: 'About Rs 3,500 per month, paid separately.',
+      lease: '11-month agreement, 6-month lock-in, 2 months notice.',
+      society: 'Gated society with 24x7 security, full power backup, clubhouse, swimming pool, gym, kids play area and covered car parking.',
+      water: 'Borewell plus Cauvery water supply.',
+      pets: selected.pets === false ? 'Pets not required.' : 'Small pets allowed with prior permission.',
+      availability: selected.move_in_date ? `Available from ${selected.move_in_date}.` : 'Available immediately.',
+      preferred_tenants: 'Families or working professionals.',
+      viewing: 'The owner can usually show the flat on weekday evenings and weekends; viewings are arranged through this assistant.',
+    } };
 }
 
 const fur = f => ({ Full: 'full', Semi: 'semi', None: 'none' }[f] ?? (f ? String(f).toLowerCase() : null));
@@ -149,4 +163,33 @@ export async function researchLocality(env, locality, city, topics) {
     return [t, items];
   }));
   return Object.fromEntries(out);
+}
+
+const inrShort = n => n >= 100000 ? `${+(n / 100000).toFixed(1)} lakh rupees` : `${Number(n).toLocaleString('en-IN')} rupees`;
+// One-line spoken description of a listing (no URLs).
+export function briefOf(l) {
+  if (l.source === 'web') return `${l.title || 'Web listing'}${l.snippet ? ': ' + l.snippet.slice(0, 140) : ''}`;
+  const am = [l.swimming_pool && 'swimming pool', l.gym && 'gym', l.lift && 'lift', l.parking && l.parking !== 'none' && `${l.parking} parking`].filter(Boolean);
+  return [
+    `${l.bhk ? l.bhk + ' BHK' : 'Home'} in ${l.locality || 'Bengaluru'}`,
+    l.rent ? `${inrShort(l.rent)} a month` : null,
+    l.deposit ? `${inrShort(l.deposit)} deposit` : null,
+    l.furnishing ? (/^(none|un)/.test(l.furnishing) ? 'unfurnished' : `${l.furnishing.replace(/-?furnished$/, '')}-furnished`) : null,
+    l.size_sqft ? `${l.size_sqft} sq ft` : null,
+    am.length ? 'with ' + am.slice(0, 3).join(', ') : null,
+  ].filter(Boolean).join(', ');
+}
+export function webLeadListing(x) {
+  let h = 2166136261; for (const ch of x.url) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return { id: 'web-' + (h >>> 0).toString(36), source: 'web', provider: x.provider, title: x.title, snippet: x.snippet, url: x.url, note: 'Web search lead, not a verified listing; details and availability unconfirmed and no owner contact.' };
+}
+
+// Compact facts for describing one option in detail; never includes phone numbers or URLs.
+export function factsOf(l) {
+  if (l.source === 'web') return { kind: 'web lead (unverified, no owner contact)', snippet: l.snippet || null };
+  const keep = ['locality', 'bhk', 'rent', 'deposit', 'negotiable', 'maintenance', 'maintenance_included', 'size_sqft', 'floor', 'total_floors', 'furnishing', 'parking', 'lift', 'gym', 'swimming_pool', 'amenities', 'available_from', 'property_type', 'owner_name', 'details'];
+  const f = Object.fromEntries(keep.filter(k => l[k] != null && !(Array.isArray(l[k]) && !l[k].length)).map(k => [k, l[k]]));
+  if (Array.isArray(f.amenities)) f.amenities = f.amenities.slice(0, 10);
+  f.viewing_can_be_arranged = !!l.owner_contact_available;
+  return f;
 }
