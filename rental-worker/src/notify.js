@@ -1,43 +1,59 @@
-import { tmo } from './util.js';
+// Outbound calls go through Talkdesk Studio flows that use the "API request" trigger
+// (POST /flows/{flow_id}/interactions, scope flows-interactions:start).
+// Each call is recorded as an "outreach" row whose id is passed to the flow, so the AI agent
+// on the call can load its briefing with the get_outreach_context tool.
+import { tmo, j } from './util.js';
 
-const configured = env => !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN);
-const esc = s => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+let cached = { token: null, exp: 0 };
+async function talkdeskToken(env) {
+  if (cached.token && Date.now() < cached.exp) return cached.token;
+  const r = await fetch(`https://${env.TALKDESK_ACCOUNT}.talkdeskid.com/oauth/token`, {
+    method: 'POST', signal: tmo(15000),
+    headers: { Authorization: 'Basic ' + btoa(`${env.TALKDESK_CLIENT_ID}:${env.TALKDESK_CLIENT_SECRET}`), 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'client_credentials', scope: 'flows-interactions:start' }),
+  });
+  if (!r.ok) throw new Error('Talkdesk auth failed: HTTP ' + r.status);
+  const d = await r.json();
+  cached = { token: d.access_token, exp: Date.now() + (d.expires_in - 60) * 1000 };
+  return cached.token;
+}
 
-async function twilio(env, path, form) {
-  const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/${path}.json`, {
-    method: 'POST', body: new URLSearchParams(form), signal: tmo(20000),
-    headers: { Authorization: 'Basic ' + btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`) },
+// kind -> env var holding the Studio flow id
+export const FLOW_ENV = { owner_ai: 'TD_FLOW_OWNER_AI', owner_bridge: 'TD_FLOW_OWNER_BRIDGE', tenant_ai: 'TD_FLOW_TENANT_AI' };
+
+async function startFlow(env, flowId, args) {
+  const r = await fetch(`${env.TALKDESK_API || 'https://api.talkdeskapp.com'}/flows/${flowId}/interactions`, {
+    method: 'POST', signal: tmo(20000),
+    headers: { Authorization: 'Bearer ' + (await talkdeskToken(env)), 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.fromEntries(Object.entries(args).map(([k, v]) => [k, String(v ?? '')]))),
   });
   const d = await r.json().catch(() => ({}));
-  return r.ok ? { ok: true, id: d.sid } : { ok: false, error: d.message || 'HTTP ' + r.status };
+  return r.ok ? { ok: true, id: d.interaction_id } : { ok: false, error: d.message || 'HTTP ' + r.status };
 }
 
-// channel: 'whatsapp' | 'sms' | 'call'. Without Twilio secrets every send is recorded as dry_run only.
-export async function send(env, { channel, to, body, ref_type = null, ref_id = null, voice_action = null }) {
-  let status = 'dry_run', provider_id = null, error = null;
-  if (configured(env)) {
-    let res;
-    if (channel === 'sms') res = env.TWILIO_SMS_FROM ? await twilio(env, 'Messages', { To: to, From: env.TWILIO_SMS_FROM, Body: body }) : { ok: false, error: 'TWILIO_SMS_FROM missing' };
-    else if (channel === 'call') {
-      const say = `<Say voice="Polly.Aditi" language="en-IN">${esc(body)}</Say>`;
-      const twiml = voice_action ? `<Response><Gather numDigits="1" timeout="8" action="${esc(voice_action)}">${say}</Gather><Say>We did not get a response. Goodbye.</Say></Response>` : `<Response>${say}</Response>`;
-      const from = env.TWILIO_VOICE_FROM || env.TWILIO_SMS_FROM; res = from ? await twilio(env, 'Calls', { To: to, From: from, Twiml: twiml }) : { ok: false, error: 'TWILIO_VOICE_FROM (voice-capable number) missing' };
-    } else res = { ok: false, error: 'unknown channel' };
-    status = res.ok ? 'sent' : 'failed'; provider_id = res.id || null; error = res.error || null;
+/**
+ * Place an outbound call via Talkdesk.
+ * kind: owner_ai (AI agent talks to owner) | owner_bridge (owner is called, then connected to the tenant) | tenant_ai (AI agent talks to tenant)
+ */
+export async function placeCall(env, { kind, to, tenant_phone = null, owner_phone = null, visit_id = null, alert_id = null, purpose, briefing = {} }) {
+  const ins = await env.DB.prepare('INSERT INTO outreach(kind,to_phone,tenant_phone,owner_phone,visit_id,alert_id,purpose,briefing) VALUES(?,?,?,?,?,?,?,?)')
+    .bind(kind, to, tenant_phone, owner_phone, visit_id, alert_id, purpose, JSON.stringify(briefing)).run();
+  const id = ins.meta.last_row_id;
+  const flowId = env[FLOW_ENV[kind]];
+  let status = 'dry_run', interaction_id = null, error = null;
+  if (flowId && env.TALKDESK_CLIENT_ID) {
+    try {
+      const res = await startFlow(env, flowId, { to_number: to, tenant_number: tenant_phone, owner_number: owner_phone, outreach_id: id, intro: briefing.spoken_intro || purpose });
+      status = res.ok ? 'dialing' : 'failed'; interaction_id = res.id || null; error = res.error || null;
+    } catch (e) { status = 'failed'; error = e.message; }
   }
-  const r = await env.DB.prepare('INSERT INTO messages(direction,channel,addr,body,status,provider_id,ref_type,ref_id) VALUES(?,?,?,?,?,?,?,?)')
-    .bind('out', channel, to, body, status, provider_id, ref_type, ref_id).run();
-  return { message_id: r.meta.last_row_id, channel, to, status, ...(error ? { error } : {}), ...(status === 'dry_run' ? { note: 'Voice provider not configured: call recorded, not placed.' } : {}) };
+  await env.DB.prepare('UPDATE outreach SET status=?, interaction_id=?, error=? WHERE id=?').bind(status, interaction_id, error, id).run();
+  return { outreach_id: id, kind, to, status, ...(error ? { error } : {}), ...(status === 'dry_run' ? { note: `Talkdesk flow for ${kind} not configured (${FLOW_ENV[kind]}); call recorded, not placed.` } : {}) };
 }
 
-// Voice-only for now: WhatsApp/SMS code paths remain but are unused.
-export const defaultChannel = () => 'call';
-
-export async function verifyTwilio(env, request, form) {
-  if (!env.TWILIO_AUTH_TOKEN) return false;
-  const sig = request.headers.get('X-Twilio-Signature'); if (!sig) return false;
-  let data = request.url; for (const k of [...form.keys()].sort()) data += k + form.get(k);
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.TWILIO_AUTH_TOKEN), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data)));
-  return btoa(String.fromCharCode(...mac)) === sig;
+export async function getOutreach(env, { outreach_id, phone }) {
+  const r = outreach_id
+    ? await env.DB.prepare('SELECT * FROM outreach WHERE id=?').bind(outreach_id).first()
+    : await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND status IN ('dialing','dry_run','in_progress') ORDER BY id DESC LIMIT 1").bind(phone).first();
+  return r ? { ...r, briefing: j(r.briefing) } : null;
 }

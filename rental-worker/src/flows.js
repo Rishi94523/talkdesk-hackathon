@@ -1,4 +1,4 @@
-import { send, defaultChannel } from './notify.js';
+import { placeCall } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
 import { j, normPhone } from './util.js';
 
@@ -29,29 +29,72 @@ export async function scheduleVisit(env, a) {
   const phone = normPhone(a.phone), owner = normPhone(a.owner_phone);
   const prof = await getProfile(env, phone);
   const tenant = prof?.name || 'a prospective tenant';
-  const mode = 'call_now';
+  const mode = a.mode === 'direct_connect' ? 'owner_bridge' : 'owner_ai';
   const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes) VALUES(?,?,?,?,?,?,?)')
     .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null).run();
   const id = ins.meta.last_row_id;
-  const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.locality || ''}`.trim();
-  const base = env.PUBLIC_URL || 'https://mergeconflicts-rentals-mcp.kelgis.workers.dev';
-  const sent = [await send(env, { channel: 'call', to: owner, body: `Hello${a.owner_name ? ' ' + a.owner_name : ''}. This is the rental assistant for ${tenant}. They would like to view your ${place} property on ${fmtTime(when)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: id, voice_action: `${base}/webhook/twilio/voice?visit=${id}` })];
-  return { visit_id: id, status: 'pending', strategy: `Owner is being called now (visit is ${Math.round(leadH)}h away); if unanswered the call is retried once after ${env.ESCALATE_MIN || 30} min.`, sent };
+  const call = await callOwner(env, id, mode);
+  return {
+    visit_id: id, status: 'pending', call,
+    strategy: mode === 'owner_ai'
+      ? `Our owner-liaison AI agent is calling ${a.owner_name || 'the owner'} on a separate call to confirm ${fmtTime(when)} (or agree another time). The tenant gets a call back with the result. If the owner asks to speak to the tenant, the call is forwarded to the tenant.`
+      : `Calling the owner now; when they answer they hear a short introduction and are connected straight to the tenant's phone. End this call so the tenant's line is free.`,
+  };
 }
 
-export async function applyOwnerResponse(env, visitId, outcome, text) {
+function ownerBriefing(v, listing, prof) {
+  const place = listing ? `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.locality || ''}`.trim() : 'rental';
+  return {
+    role: 'You are calling the PROPERTY OWNER on behalf of a prospective tenant.',
+    goal: `Confirm a viewing of the ${place} property on ${fmtTime(v.requested_time)}, or agree an alternative time. Optionally confirm current rent/deposit and availability.`,
+    tenant: { name: prof?.name || 'the prospective tenant', budget: prof?.max_rent, move_in: prof?.move_in_date },
+    listing: listing ? { id: listing.id, title: listing.title, locality: listing.locality, rent: listing.rent, deposit: listing.deposit, url: listing.url } : null,
+    visit_id: v.id, requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
+    spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing.`,
+    when_done: 'Call record_owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. If the owner wants to talk to the tenant directly, call request_direct_connect then end the conversation with the transfer exit.',
+  };
+}
+
+export async function callOwner(env, visitId, mode = 'owner_ai') {
+  const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
+  const listing = await getListing(env, v.listing_id), prof = await getProfile(env, v.phone);
+  return placeCall(env, { kind: mode, to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing request for listing ${v.listing_id}`, briefing: ownerBriefing(v, listing, prof) });
+}
+
+// Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.
+export async function callTenant(env, { phone, purpose, details = {}, visit_id = null, alert_id = null }) {
+  const prof = await getProfile(env, phone);
+  return placeCall(env, {
+    kind: 'tenant_ai', to: phone, tenant_phone: phone, visit_id, alert_id, purpose,
+    briefing: {
+      role: 'You are calling the TENANT (your client) back. This is a two-way conversation, not an announcement.',
+      purpose, ...details, tenant_profile: prof,
+      spoken_intro: `Hi${prof?.name ? ' ' + prof.name : ''}, this is your rental assistant calling with an update.`,
+      you_can: ['Describe the listings or update and answer questions', 'add_to_wishlist', 'schedule_visit (ask for preferred time and AI-call vs direct connect)', 'save_tenant_profile with changed preferences', 'research_locality / negotiation_brief on request', 'cancel_listing_alert if they want no more calls'],
+      when_done: 'Call complete_outreach with a short summary.',
+    },
+  });
+}
+
+export async function applyOwnerResponse(env, visitId, outcome, text, proposed_time = null, { notifyTenant = true } = {}) {
   const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
   if (!v) return { error: 'visit not found' };
-  const status = { yes: 'confirmed', no: 'declined', other: 'needs_attention' }[outcome] || outcome;
-  await env.DB.prepare('UPDATE visits SET status=?, notes=COALESCE(notes||char(10),\'\')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(status, 'Owner: ' + (text || outcome), visitId).run();
+  const status = { yes: 'confirmed', no: 'declined', reschedule: 'owner_proposed_time', other: 'needs_attention' }[outcome] || outcome;
+  let newTime = null;
+  if (proposed_time && !isNaN(new Date(proposed_time))) newTime = new Date(proposed_time).toISOString();
+  await env.DB.prepare('UPDATE visits SET status=?, requested_time=COALESCE(?,requested_time), notes=COALESCE(notes||char(10),\'\')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
+    .bind(status, status === 'owner_proposed_time' ? newTime : null, 'Owner: ' + (text || outcome) + (newTime ? ` (proposed ${newTime})` : ''), visitId).run();
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind LIKE 'owner%' AND status IN ('dialing','dry_run','in_progress')").bind(`Owner said ${outcome}: ${text || ''}`.slice(0, 500), visitId).run();
   const listing = await getListing(env, v.listing_id);
   const place = listing ? `${listing.bhk} BHK in ${listing.locality}` : v.listing_id;
-  const msg = status === 'confirmed' ? `Good news: the owner confirmed your visit to the ${place} on ${fmtTime(v.requested_time)}.`
-    : status === 'declined' ? `The owner can't do ${fmtTime(v.requested_time)} for the ${place}. Call back with another time and I'll ask again.`
-    : `The owner said something about the ${place} that needs your attention: ${(text || '').slice(0, 160)}.`;
+  const when = fmtTime(newTime || v.requested_time);
+  const update = status === 'confirmed' ? `The owner confirmed the visit to the ${place} on ${when}.`
+    : status === 'declined' ? `The owner cannot do ${fmtTime(v.requested_time)} for the ${place}.`
+    : status === 'owner_proposed_time' ? `The owner proposed ${when} instead for the ${place}; ask the tenant if that works.`
+    : `The owner said something about the ${place} that needs the tenant's input: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
-  const note = await send(env, { channel: defaultChannel(env), to: v.phone, body: msg, ref_type: 'visit', ref_id: visitId });
-  return { visit_id: visitId, status, tenant_notified: note };
+  const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Offer a property dossier / negotiation tips before the visit.' : 'Ask for a new time (or accept the proposed one) and call schedule_visit or confirm_proposed_time.' } }) : null;
+  return { visit_id: visitId, status, update, tenant_call };
 }
 
 export function parseReply(body) {
@@ -61,14 +104,12 @@ export function parseReply(body) {
   return 'other';
 }
 
-export async function handleInbound(env, from, body) {
-  const addr = from.replace(/^whatsapp:/, '');
-  await env.DB.prepare('INSERT INTO messages(direction,channel,addr,body,status) VALUES(?,?,?,?,?)').bind('in', from.startsWith('whatsapp:') ? 'whatsapp' : 'sms', addr, body, 'received').run();
-  const ref = /\bV(\d+)\b/i.exec(body);
-  const v = ref ? await env.DB.prepare('SELECT id FROM visits WHERE id=? AND owner_phone=?').bind(+ref[1], addr).first()
-    : await env.DB.prepare("SELECT id FROM visits WHERE owner_phone=? AND status IN ('pending','needs_attention') ORDER BY id DESC LIMIT 1").bind(addr).first();
-  if (!v) return { matched: false };
-  return { matched: true, ...(await applyOwnerResponse(env, v.id, parseReply(body.replace(/\(?Ref V\d+\)?/i, '')), body)) };
+// Owner proposed a time and the tenant accepted it.
+export async function confirmProposedTime(env, visitId) {
+  await env.DB.prepare("UPDATE visits SET status='confirmed', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='owner_proposed_time'").bind(visitId).run();
+  const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
+  if (v?.status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled'").bind(v.phone, v.listing_id).run();
+  return { visit: v };
 }
 
 // ---- Deals --------------------------------------------------------------------
@@ -147,23 +188,21 @@ export async function runAlerts(env) {
     const baseline = !al.last_run;
     await env.DB.prepare('UPDATE alerts SET last_run=CURRENT_TIMESTAMP WHERE id=?').bind(al.id).run();
     if (baseline || !fresh.length) { report.push({ alert: al.id, new: baseline ? 0 : fresh.length, baseline }); continue; }
-    const top = fresh.slice(0, 3);
-    const body = `New listing alert. ${fresh.length} new place${fresh.length > 1 ? 's' : ''} match your search. ` + top.map(l => `A ${l.bhk} BHK in ${l.locality} for ${l.rent} rupees a month with a deposit of ${l.deposit}`).join('. Also, ') + '. Call us back to hear more or book a visit.';
-    const sent = [await send(env, { channel: 'call', to: al.phone, body, ref_type: 'alert', ref_id: al.id })];
-    report.push({ alert: al.id, new: fresh.length, sent });
+    const top = fresh.slice(0, 3).map(({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }) => ({ id, title, locality, bhk, rent, deposit, furnishing, parking, match_score, mismatches, url, available_from }));
+    const call = await callTenant(env, { phone: al.phone, alert_id: al.id, purpose: `New listing alert: ${fresh.length} new match${fresh.length > 1 ? 'es' : ''} for the tenant's saved search.`, details: { new_listings: top, criteria: c, next: 'Walk through the listings one by one, ask which they like, offer to add to wishlist, research the area, or schedule a visit. Ask if their preferences changed.' } });
+    report.push({ alert: al.id, new: fresh.length, call });
   }
   return report;
 }
 
+// Retry an unanswered owner call once (the owner-liaison agent records an outcome when the call connects).
 export async function escalateVisits(env) {
   const mins = +(env.ESCALATE_MIN || 30);
-  const rows = (await env.DB.prepare("SELECT * FROM visits WHERE status='pending' AND escalated=0 AND created_at <= datetime('now', ?)").bind(`-${mins} minutes`).all()).results;
-  const base = env.PUBLIC_URL || 'https://mergeconflicts-rentals-mcp.kelgis.workers.dev';
+  const rows = (await env.DB.prepare("SELECT * FROM visits WHERE status='pending' AND escalated=0 AND channel='owner_ai' AND created_at <= datetime('now', ?)").bind(`-${mins} minutes`).all()).results;
   const out = [];
   for (const v of rows) {
-    const l = await getListing(env, v.listing_id);
-    out.push(await send(env, { channel: 'call', to: v.owner_phone, body: `Hello. We called you earlier about a viewing of your ${l?.locality || ''} property on ${fmtTime(v.requested_time)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: v.id, voice_action: `${base}/webhook/twilio/voice?visit=${v.id}` }));
     await env.DB.prepare('UPDATE visits SET escalated=1 WHERE id=?').bind(v.id).run();
+    out.push(await callOwner(env, v.id, 'owner_ai'));
   }
   return out;
 }
