@@ -8,3 +8,5 @@ node_modules/
 .wrangler/
 .dev.vars
 .mcp-token
+
+rental-worker/build/
