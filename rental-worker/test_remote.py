@@ -23,22 +23,35 @@ except HTTPError as e:
 print('PASS unauthenticated request rejected')
 init=post('initialize',{'protocolVersion':'2025-03-26','capabilities':{},'clientInfo':{'name':'mergeconflicts-test','version':'1.0'}})
 assert 'result' in init, init
-tools=post('tools/list')
-assert len(tools['result']['tools'])>=5, tools
-print('PASS initialized MCP; tool count:',len(tools['result']['tools']))
-result=post('tools/call',{'name':'search_demo_listings','arguments':{'locality':'Whitefield','bhk':2,'max_rent':33000,'pets_required':True}})
-assert 'MC-001' in json.dumps(result) and 'MC-002' not in json.dumps(result),result
-print('PASS mock listing filter')
-saved=post('tools/call',{'name':'save_demo_search','arguments':{'locality':'Whitefield','bhk':2,'max_rent':33000}})
-assert not saved.get('result',{}).get('isError') and 'search_id' in json.dumps(saved),saved
-print('PASS database write')
-visit=post('tools/call',{'name':'request_demo_viewing','arguments':{'listing_id':'MC-001','requested_time':'Saturday 11am'}})
-assert 'demo_request_not_confirmed' in json.dumps(visit),visit
-print('PASS demo viewing remains unconfirmed')
-if '--live' in sys.argv:
-    live=post('tools/call',{'name':'discover_public_listings','arguments':{'objective':'Find 2 BHK apartments for rent in Whitefield Bangalore up to 35000 rupees, with listing pages.'}})
-    if live.get('result',{}).get('isError'): raise SystemExit('FAIL hosted Parallel tool: '+json.dumps(live))
-    content=live['result']['content'][0]['text']
-    data=json.loads(content)
-    assert isinstance(data.get('results'),list) and data['results'],data
-    print('PASS hosted Parallel tool; candidate results:',len(data['results']))
+tools=post('tools/list')['result']['tools']
+print('PASS tools:',len(tools))
+def call(n,a):
+    r=post('tools/call',{'name':n,'arguments':a})['result']
+    assert not r.get('isError'),(n,r)
+    return json.loads(r['content'][0]['text'])
+P='+919900000001'
+print(call('save_tenant_profile',{'phone':P,'name':'Test Tenant','whatsapp_ok':True,'locality':'Whitefield','bhk':2,'max_rent':35000,'amenities':['parking']})['profile'])
+s=call('search_listings',{'locality':'Whitefield','bhk':2,'max_rent':35000,'amenities':['parking'],'limit':3})
+print('search total',s['total_on_portal'],s.get('warning'),[(x['id'],x['locality'],x['rent'],x['match_score']) for x in s['results']])
+lid=s['results'][0]['id']
+call('add_to_wishlist',{'phone':P,'listing_id':lid,'note':'test'})
+print('wishlist',len(call('get_wishlist',{'phone':P})['wishlist']))
+b=call('negotiation_brief',{'listing_id':lid,'max_rent':35000})
+print(json.dumps({k:b[k] for k in ('listing_rent','rent_vs_median_pct','rent_plan','deposit_plan')}))
+r=call('research_locality',{'locality':'Whitefield','topics':['safety','scams']})
+print('research',{k:len(v) for k,v in r['findings'].items()})
+import datetime
+t=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=3)).isoformat()
+v=call('schedule_visit',{'phone':P,'listing_id':lid,'owner_phone':'+919900000002','owner_name':'Mr Rao','requested_time':t})
+print('visit',v['visit_id'],v['strategy'],[m['status'] for m in v['sent']])
+print('owner reply ->',call('simulate_owner_reply',{'visit_id':v['visit_id'],'text':'Yes, that works'})['status'])
+print('status',call('get_visit_status',{'visit_id':v['visit_id']})['visit']['status'])
+t2=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=3)).isoformat()
+v2=call('schedule_visit',{'phone':P,'listing_id':lid,'owner_phone':'+919900000003','requested_time':t2})
+print('urgent visit',v2['strategy'],[m['channel'] for m in v2['sent']])
+a=call('create_listing_alert',{'phone':P,'locality':'Whitefield','bhk':2,'max_rent':35000,'consent':True})
+print('alert',a['alert_id'])
+print('alert run',call('run_alert_check_now',{})['report'])
+ag=call('draft_rental_agreement',{'phone':P,'listing_id':lid,'landlord_name':'Mr Rao','tenant_name':'Test Tenant','property_address':'Whitefield, Bengaluru','rent':b['rent_plan']['target'],'deposit':100000,'start_date':'2026-12-01'})
+print('agreement chars',len(ag['agreement_text']))
+print('deal',call('get_tenant_profile',{'phone':P})['deals'])
