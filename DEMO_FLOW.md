@@ -1,0 +1,13 @@
+# MergeConflicts: target hackathon demo
+
+This describes the desired end-to-end demo, not a claim that it currently works. The apartment and its details are fictional and must be presented as a demonstration listing; it is not a real Prestige development.
+
+1. A tenant calls the MergeConflicts rental concierge and asks for a home in Whitefield (or another Bengaluru locality), specifying any preferences such as BHK, rent, deposit, amenities and move-in date.
+2. Search returns a fictional apartment with a constant, recognizable name as its first result. Its locality and other demo attributes adapt to the tenant's stated constraints; real listings are also searched. The assistant describes the demo apartment's details naturally, without reading a URL aloud, and offers to arrange a visit.
+3. The tenant identifies that apartment by its name or description and requests a viewing at a preferred time. The agent saves the request, then ends the tenant interaction and independently calls the demo owner, Rishi D V, on the user-authorized phone number stored as a secret. This is a real two-way AI voice conversation, not a recorded announcement or a press-1 bridge.
+4. The owner accepts the tenant's proposed time or suggests an alternative. The agent records exactly what the owner said; a booking is confirmed only when the required parties agree. A separate two-way AI callback informs the tenant and can answer follow-up questions or handle an alternative time.
+5. The tenant later calls again and says they visited the apartment. The assistant remembers the property, visit and prior conversation, gathers the tenant's negotiation terms and explicit limits, and independently calls the owner to discuss them. No press-1 connection or transfer is needed.
+6. The owner and tenant can exchange offers through separate two-way calls. The assistant accurately records and conveys each party's response without claiming agreement before it occurs.
+7. If the tenant wants to proceed, the assistant records their intention to sign and preferred move-in date and communicates that intention to the owner in a separate conversation. It does not claim a contract was signed or bind either party without an actual agreement.
+
+Memory must preserve concise summaries and structured property, visit and negotiation events across calls; avoid offering the same rejected listing repeatedly. Callback and owner calls need actual Talkdesk flows, context handoff and tested status tracking. Only the user's authorized demo number may be called during tests, and no secrets or private phone numbers belong in Git.
