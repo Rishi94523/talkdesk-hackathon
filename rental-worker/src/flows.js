@@ -31,8 +31,8 @@ export async function scheduleVisit(env, a) {
   const prof = await getProfile(env, phone);
   const tenant = prof?.name || 'a prospective tenant';
   const mode = 'owner_ai';
-  const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes) VALUES(?,?,?,?,?,?,?)')
-    .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null).run();
+  const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes,escalated) VALUES(?,?,?,?,?,?,?,?)')
+    .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null, a.dry_run_only ? 1 : 0).run();
   const id = ins.meta.last_row_id;
   await recordProperty(env, phone, a.listing_id, 'visit_requested', null, null, `visit:${id}`);
   const call = await callOwner(env, id, mode);

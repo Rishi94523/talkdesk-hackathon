@@ -112,14 +112,14 @@ function makeServer(env) {
     action: z.enum(['schedule', 'status', 'accept_owner_time', 'demo_owner_reply']).optional(),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), owner_phone: z.string().max(20).optional(),
     owner_name: z.string().max(80).optional(), requested_time: z.string().max(40).optional(),
-    notes: z.string().max(300).optional(),
+    notes: z.string().max(300).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the request without placing any calls.'),
     visit_id: z.number().int().optional(), text: z.string().max(200).optional(),
   }, async ({ action, visit_id, text, ...a }) => {
     if (action === 'schedule') {
       if (!a.phone || !a.listing_id || !a.requested_time) return { error: 'schedule needs phone, listing_id and requested_time' };
       if (!a.owner_phone && a.listing_id.startsWith('MC-SHOWCASE-')) { a.owner_phone = env.DEMO_OWNER_PHONE; a.owner_name ||= 'Rishi D V'; }
       if (!a.owner_phone) return { error: 'No owner contact is available for this listing.' };
-      return scheduleVisit(env, a);
+      return scheduleVisit(a.dry_run_only ? { ...env, TD_FLOW_OWNER_AI: null, TD_FLOW_OWNER_BRIDGE: null } : env, a);
     }
     if (!visit_id) return { error: 'visit_id required' };
     if (action === 'status') return { visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() };
@@ -163,17 +163,18 @@ function makeServer(env) {
   });
 
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
-    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(),
+    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
-  }, async ({ visit_id, outreach_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
+  }, async ({ visit_id, outreach_id, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only }) => {
+    const responseEnv = dry_run_only ? { ...env, TD_FLOW_TENANT_AI: null } : env;
     if (outreach_id) {
       const outreach = await getOutreach(env, { outreach_id });
       if (!outreach) return { error: 'Outreach not found; do not record an owner response.' };
-      if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit });
+      if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(responseEnv, outreach, { outcome, details, quoted_rent, quoted_deposit });
       visit_id ||= outreach?.visit_id;
     }
     if (!visit_id) return { error: 'visit_id or valid outreach_id required' };
-    const r = await applyOwnerResponse(env, visit_id, outcome, details, proposed_time);
+    const r = await applyOwnerResponse(responseEnv, visit_id, outcome, details, proposed_time);
     if (!r.error && (quoted_rent || quoted_deposit)) {
       const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first();
       await updateDeal(env, v.phone, v.listing_id, null, { owner_quoted_rent: quoted_rent, owner_quoted_deposit: quoted_deposit });

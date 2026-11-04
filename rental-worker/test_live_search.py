@@ -1,4 +1,4 @@
-"""Read-only live MCP search smoke test; never print credentials or contact data."""
+"""Live MCP search smoke test; refreshes listing cache and uses search credits."""
 import json, subprocess
 from pathlib import Path
 
