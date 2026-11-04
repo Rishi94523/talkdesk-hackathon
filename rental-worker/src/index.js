@@ -167,6 +167,7 @@ function makeServer(env) {
   }, async ({ visit_id, outreach_id, outcome, details, proposed_time, quoted_rent, quoted_deposit }) => {
     if (outreach_id) {
       const outreach = await getOutreach(env, { outreach_id });
+      if (!outreach) return { error: 'Outreach not found; do not record an owner response.' };
       if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit });
       visit_id ||= outreach?.visit_id;
     }

@@ -11,6 +11,7 @@ const env = { DB: { prepare(sql) { return { bind(...args) { return {
     return null;
   },
   async run() { writes.push({ sql, args }); return { meta: { last_row_id: 8 } }; },
+  async all() { return { results: [] }; },
 }; } }; } } };
 const base = { phone: '+911111111111', listing_id: 'demo' };
 assert.match((await startOwnerDiscussion(env, { ...base, purpose: 'negotiation', offer: 'Lower rent' })).error, /explicit/);
@@ -25,4 +26,8 @@ assert.equal(briefing.task, 'negotiation');
 assert.equal(briefing.authorized_max_rent, 32000);
 assert.match(briefing.instruction, /Do not claim acceptance/);
 assert.match((await recordOwnerDiscussion(env, { purpose: 'negotiation', status: 'completed' }, { outcome: 'yes' })).error, /already recorded/);
+const recorded = await recordOwnerDiscussion(env, { id: 8, purpose: 'negotiation', status: 'in_progress', tenant_phone: '+911111111111', visit_id: 3, briefing: { listing: { id: 'demo' } } }, { outcome: 'yes', details: 'Agreed to 30000' });
+assert.equal(recorded.recorded, true);
+assert.equal(recorded.tenant_call.status, 'dry_run');
+assert.ok(writes.some(x => x.sql.startsWith('UPDATE outreach') && x.args[1] === 8));
 console.log('Owner discussion validation and dry-run behavior passed');

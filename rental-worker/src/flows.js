@@ -85,7 +85,7 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
 export async function recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit }) {
   if (!outreach || !['negotiation', 'signing_intent'].includes(outreach.purpose)) return { error: 'An active negotiation or signing-intent outreach is required.' };
   if (outreach.status === 'completed') return { error: 'This owner response was already recorded; do not send another callback.' };
-  const briefing = j(outreach.briefing);
+  const briefing = typeof outreach.briefing === 'string' ? j(outreach.briefing) : (outreach.briefing || {});
   const listingId = briefing.listing?.id;
   if (!listingId || !outreach.tenant_phone) return { error: 'Outreach is missing its tenant or property.' };
   const note = (details || outcome).slice(0, 400);
