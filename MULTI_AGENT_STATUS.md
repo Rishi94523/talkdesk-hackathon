@@ -10,7 +10,7 @@ The supervisor delegates through a Conditions node to five specialists:
 - `Visit_Coordinator_MergeConflicts`: MCP `visits`, with schedule selected; required call inputs and outbound flows are not yet configured.
 - `Deal_Advisor_MergeConflicts`: MCP `deal`, with update selected; required deal inputs are not yet configured.
 
-On 2026-11-04, a simulator request for Whitefield safety and amenities produced a Talkdesk work-stream trace: supervisor -> locality researcher (`research` tool) -> supervisor. The response summarized findings but omitted the requested source links, so the response is not ready for publication.
+On 2026-11-04, a simulator request for Whitefield safety and amenities produced a Talkdesk work-stream trace: supervisor -> locality researcher (`research` tool) -> supervisor. The first response omitted requested links. After updating both agent instructions to preserve source names and URLs, a second simulator response included four links; their correspondence to the provider output and accuracy still need independent verification. The model's safety summary also needs scrutiny and should not be treated as an established crime assessment.
 
 Remaining before publishing: map bedroom, budget, deposit and amenity inputs for search; map memory updates, property events and call summaries; map visit and deal inputs; test each delegation and source citations; configure and test separate outbound call flows and notification delivery; add appropriate caller authentication. Caller ID by itself is not authentication. Do not claim that calls, visits, messages or signed agreements occurred based on dry runs.
 
