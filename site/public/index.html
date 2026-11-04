@@ -4,93 +4,100 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MergeConflicts Rentals</title>
-<meta name="description" content="An AI rental concierge for Bengaluru: live listings, locality research, owner calls, negotiation and a draft agreement, all from one phone call.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23c2410c'/><path d='M8 16l8-7 8 7v8h-5v-5h-6v5H8z' fill='white'/></svg>">
+<meta name="description" content="Find a rental flat in Bengaluru with one phone call. We search live listings, check the area, call the owner and help you negotiate.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23121212'/><path d='M8 16l8-7 8 7v8h-5v-5h-6v5H8z' fill='%23FFD60A'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=Azeret+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="nav">
   <div class="wrap nav-inner">
     <a class="brand" href="#top" aria-label="MergeConflicts Rentals home">
-      <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8"/><path d="M8 16l8-7 8 7v8h-5v-5h-6v5H8z"/></svg></span>
-      <span>MergeConflicts <em>Rentals</em></span>
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32"/><path d="M8 16l8-7 8 7v8h-5v-5h-6v5H8z"/></svg></span>
+      MergeConflicts Rentals
     </a>
     <nav class="links" aria-label="Sections">
       <a href="#how">How it works</a>
-      <a href="#listings">Listings</a>
-      <a href="#agents">Agents</a>
+      <a href="#listings">Flats</a>
+      <a href="#for-you">What we do</a>
       <a href="#safety">Safety</a>
     </nav>
-    <a class="btn btn-small call-link" href="#listings" data-call>Browse listings</a>
+    <a class="nav-call" href="#listings" data-call>Browse flats</a>
   </div>
 </header>
 
 <main id="top">
   <section class="hero wrap">
-    <div class="hero-copy">
-      <p class="eyebrow">AI rental concierge · Bengaluru</p>
-      <h1>Find your next home with <span class="accent">one phone call.</span></h1>
-      <p class="lede">Tell our voice agent what you need. It searches live listings, researches the neighbourhood, calls the owner to set up a viewing, helps you negotiate and drafts the rental agreement.</p>
-      <div class="cta">
-        <a class="btn" href="#listings" data-call-primary>Browse live listings</a>
-        <a class="btn btn-ghost" href="#how">See how it works</a>
+    <h1>Find a flat in Bengaluru.<br><span class="mark">Just call.</span></h1>
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="lede">Tell us what you need over the phone. We search live listings, check the neighbourhood, call the owner to set up a viewing and help you agree a fair rent.</p>
+        <div class="cta">
+          <a class="btn" href="#listings" data-call-primary>Browse flats</a>
+          <a class="link" href="#how">How it works</a>
+        </div>
       </div>
-      <p class="phone-line" data-phone-line hidden>Concierge line: <a data-phone></a></p>
-    </div>
 
-    <figure class="call-card" aria-label="Example conversation with the concierge">
-      <div class="call-head">
-        <span class="pulse" aria-hidden="true"></span>
-        <div><strong>Rental Concierge</strong><span>On call · 02:41</span></div>
-      </div>
-      <ol class="chat">
-        <li class="me">I need a 2 BHK in Whitefield under ₹30,000. I have a car.</li>
-        <li class="bot">I found 6 matches with car parking. The best is 900 sq ft in Hagadur at ₹24,000, deposit ₹72,000.</li>
-        <li class="me">Is the area safe? Any scams I should know about?</li>
-        <li class="bot">Residents rate it well. Watch for "token advance" requests before a visit; never pay before seeing the flat.</li>
-        <li class="me">Book a visit for Saturday at 11.</li>
-        <li class="bot">I'll call the owner now and ring you back once they confirm.</li>
-      </ol>
-      <figcaption>Illustrative conversation</figcaption>
-    </figure>
+      <form class="panel search" data-quick aria-label="Quick search">
+        <div class="panel-head"><span>Quick search</span><span class="mono" data-live>connecting</span></div>
+        <div class="panel-body">
+          <label>Area
+            <select name="locality"><option value="">Anywhere in Bengaluru</option></select>
+          </label>
+          <div class="row">
+            <label>BHK
+              <select name="bhk"><option value="">Any</option><option>1</option><option>2</option><option>3</option><option>4</option></select>
+            </label>
+            <label>Budget per month
+              <select name="max_rent">
+                <option value="">No limit</option><option value="15000">Up to ₹15,000</option><option value="20000">Up to ₹20,000</option>
+                <option value="25000">Up to ₹25,000</option><option value="30000">Up to ₹30,000</option><option value="40000">Up to ₹40,000</option><option value="60000">Up to ₹60,000</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn btn-block" type="submit">Show flats</button>
+        </div>
+        <div class="panel-foot"><span class="dot" aria-hidden="true"></span><span data-quick-meta>Live listings from NoBroker</span></div>
+      </form>
+    </div>
   </section>
 
-  <section class="stats" aria-label="Live numbers">
+  <section class="stats" aria-label="Live numbers" data-stats hidden>
     <div class="wrap stats-grid">
-      <div><b data-stat="listings">–</b><span>listings tracked</span></div>
+      <div><b data-stat="listings">–</b><span>flats tracked</span></div>
+      <div><b data-stat="median">–</b><span>median rent</span></div>
+      <div><b data-stat="cheapest">–</b><span>cheapest right now</span></div>
       <div><b data-stat="visits">–</b><span>viewings arranged</span></div>
-      <div><b data-stat="alerts">–</b><span>active listing alerts</span></div>
-      <div><b data-stat="deals">–</b><span>deals in progress</span></div>
     </div>
   </section>
 
   <section id="how" class="wrap section">
-    <p class="eyebrow">How it works</p>
-    <h2>From "I need a flat" to a signed draft</h2>
-    <ol class="steps">
-      <li><span class="n">1</span><h3>Tell us what you need</h3><p>Budget, deposit, BHK, area, parking, pets, move-in date. The concierge remembers you next time you call.</p></li>
-      <li><span class="n">2</span><h3>Live search</h3><p>Listings come from NoBroker in real time and are ranked against your preferences with a match score.</p></li>
-      <li><span class="n">3</span><h3>Neighbourhood research</h3><p>Resident reviews, safety, known rental scams, schools and amenities, gathered from the web in parallel.</p></li>
-      <li><span class="n">4</span><h3>Viewing with the owner</h3><p>Our owner-liaison agent phones the owner to confirm a time, or connects you to them directly.</p></li>
-      <li><span class="n">5</span><h3>Negotiation plan</h3><p>Market comparison, an opening offer, a target and a walk-away price, plus a script for the conversation.</p></li>
-      <li><span class="n">6</span><h3>Draft agreement</h3><p>Agreed terms become a draft 11-month rental agreement for both sides to review, stamp and sign.</p></li>
-    </ol>
+    <div class="split">
+      <div class="split-head">
+        <h2>Six steps, one phone call.</h2>
+        <p class="sub">You talk, we do the legwork. We call you back whenever there's news.</p>
+      </div>
+      <ol class="stations">
+        <li><span class="n">1</span><div><h3>Tell us what you need</h3><p class="tag">You call</p></div><p>Budget, deposit, BHK, area, parking, pets and when you want to move. We remember you next time.</p></li>
+        <li><span class="n">2</span><div><h3>We search</h3><p class="tag">Live listings</p></div><p>We check live listings and rank them by how well they fit what you asked for.</p></li>
+        <li><span class="n">3</span><div><h3>We check the area</h3><p class="tag">Research</p></div><p>What residents say, safety, known rental scams, schools and what's nearby.</p></li>
+        <li><span class="n">4</span><div><h3>We call the owner</h3><p class="tag">Viewing</p></div><p>We fix a viewing time with the owner, or connect you to them directly if you prefer.</p></li>
+        <li><span class="n">5</span><div><h3>We help you negotiate</h3><p class="tag">Fair price</p></div><p>What similar flats rent for, what to offer first and when to walk away.</p></li>
+        <li><span class="n">6</span><div><h3>You get a draft agreement</h3><p class="tag">Move in</p></div><p>The terms you agreed, written up as a draft rental agreement for both sides to check and sign.</p></li>
+      </ol>
+    </div>
   </section>
 
   <section id="listings" class="section listings-section">
     <div class="wrap">
       <div class="section-head">
-        <div>
-          <p class="eyebrow">Live listings</p>
-          <h2>What the concierge has found</h2>
-          <p class="muted" data-listing-meta>Loading listings…</p>
-        </div>
+        <h2>Flats available now</h2>
+        <p class="mono muted" data-listing-meta>Loading…</p>
       </div>
 
-      <form class="filters" data-filters aria-label="Filter listings">
+      <form class="filters" data-filters aria-label="Filter flats">
         <label>Area
           <select name="locality"><option value="">All areas</option></select>
         </label>
@@ -109,56 +116,49 @@
       </form>
 
       <div class="grid" data-grid aria-live="polite"></div>
-      <p class="fineprint">Listings come from a third-party portal and may be out of date. Owner contact details are not published. Always visit and verify ownership before paying anything.</p>
+      <p class="fineprint">Listings come from NoBroker and may be out of date. Owner phone numbers aren't published; call us and we'll contact the owner for you. Always visit and check ownership before you pay anything.</p>
     </div>
   </section>
 
-  <section id="agents" class="wrap section">
-    <p class="eyebrow">Built on Talkdesk</p>
-    <h2>Three voice agents, one shared memory</h2>
-    <div class="agents">
-      <article>
-        <span class="tag in">Inbound</span>
-        <h3>Concierge</h3>
-        <p>Answers your call, learns your preferences, searches, researches, books viewings and tracks the deal.</p>
-        <ul class="chips"><li>tenant</li><li>listings</li><li>research</li><li>visits</li><li>deal</li></ul>
-      </article>
-      <article>
-        <span class="tag out">Outbound</span>
-        <h3>Owner liaison</h3>
-        <p>Calls the property owner, confirms or reschedules the viewing and notes the rent and deposit they quote.</p>
-        <ul class="chips"><li>call_context</li><li>owner_response</li><li>listings</li></ul>
-      </article>
-      <article>
-        <span class="tag out">Outbound</span>
-        <h3>Tenant callback</h3>
-        <p>Rings you back with the owner's answer, and calls when a new listing matches one of your alerts.</p>
-        <ul class="chips"><li>call_context</li><li>tenant</li><li>visits</li><li>research</li></ul>
-      </article>
+  <section id="for-you" class="wrap section">
+    <div class="split">
+      <div class="split-head">
+        <h2>You ask.<br>We do the calls.</h2>
+        <p class="sub">Everything a broker does, without the brokerage. You stay in control of every decision.</p>
+      </div>
+      <div class="table" role="table" aria-label="What we do for you">
+        <div class="tr th" role="row"><span role="columnheader">You say</span><span role="columnheader">We do</span><span role="columnheader">You get</span></div>
+        <div class="tr" role="row"><span role="cell"><b>"2 BHK near Whitefield, under ₹30k"</b></span><span role="cell">Search live listings and rank them against your needs.</span><span role="cell">A shortlist read out on the call.</span></div>
+        <div class="tr" role="row"><span role="cell"><b>"Is this area safe?"</b></span><span role="cell">Read resident reviews, forums and news about the area.</span><span role="cell">A plain summary, with what to watch out for.</span></div>
+        <div class="tr" role="row"><span role="cell"><b>"Can I see it on Saturday?"</b></span><span role="cell">Phone the owner and agree a time.</span><span role="cell">A call back with the confirmed time.</span></div>
+        <div class="tr" role="row"><span role="cell"><b>"Is ₹28k fair?"</b></span><span role="cell">Compare with similar flats nearby.</span><span role="cell">An opening offer, a target and a walk-away price.</span></div>
+        <div class="tr" role="row"><span role="cell"><b>"Tell me when something new comes up"</b></span><span role="cell">Watch for new listings that match.</span><span role="cell">A phone call when one appears, only if you agreed.</span></div>
+      </div>
     </div>
-    <p class="muted center">All three agents use one MCP server on Cloudflare Workers, with a shared D1 database.</p>
   </section>
 
   <section id="safety" class="section safety-section">
-    <div class="wrap safety">
-      <div>
-        <p class="eyebrow">Safety first</p>
-        <h2>What we will never do</h2>
-      </div>
+    <div class="wrap">
+      <h2>What we will never do.</h2>
       <ul class="checks">
-        <li><b>Never take money.</b> We don't collect deposits, token advances or fees.</li>
-        <li><b>Never invent a listing.</b> Every listing links to its source so you can check it.</li>
-        <li><b>Never call without consent.</b> Alert calls only start after you agree to them.</li>
-        <li><b>Never give legal advice.</b> The agreement is a draft for both parties to review.</li>
+        <li><b>Take your money.</b> No deposits, token advances or fees go through us.</li>
+        <li><b>Make up a flat.</b> Every listing links to where it was posted, so you can check it.</li>
+        <li><b>Call you uninvited.</b> We only call about new flats after you say yes.</li>
+        <li><b>Give legal advice.</b> The agreement is a draft for both sides to read and sign.</li>
       </ul>
     </div>
+  </section>
+
+  <section class="wrap closing">
+    <h2>Ready to find your place?</h2>
+    <a class="btn" href="#listings" data-call-primary>Browse flats</a>
   </section>
 </main>
 
 <footer class="footer">
   <div class="wrap footer-inner">
-    <span>MergeConflicts Rentals · Talkdesk hackathon 2026</span>
-    <span class="muted">Demo project. Not a real-estate broker.</span>
+    <span>MergeConflicts Rentals</span>
+    <span class="mono muted">Talkdesk hackathon 2026 · demo project, not a licensed broker</span>
   </div>
 </footer>
 
