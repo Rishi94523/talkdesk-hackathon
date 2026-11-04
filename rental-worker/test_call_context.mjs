@@ -12,9 +12,11 @@ const insert = db.prepare('INSERT INTO outreach(id,kind,to_phone,status,interact
 insert.run(1, 'owner_ai', '+911111111111', 'dialing', 'interaction-one', '{"task":"visit"}', new Date().toISOString());
 assert.equal((await getOutreach(env, { interaction_id: 'interaction-one' })).id, 1);
 assert.equal((await getOutreach(env, { phone: '+911111111111', kind: 'owner_ai' })).id, 1);
+assert.equal((await getOutreach(env, { phone: '+911111111111' })).id, 1);
 assert.equal(await getOutreach(env, { phone: '+911111111111', kind: 'tenant_ai' }), null);
 insert.run(2, 'owner_ai', '+911111111111', 'initiating', null, '{}', new Date().toISOString());
 assert.equal(await getOutreach(env, { phone: '+911111111111', kind: 'owner_ai' }), null, 'ambiguous calls fail closed');
+assert.equal(await getOutreach(env, { phone: '+911111111111' }), null, 'an unspecified role is also ambiguity checked');
 db.prepare('UPDATE outreach SET status=? WHERE id=2').run('dry_run');
 assert.equal((await getOutreach(env, { phone: '+911111111111', kind: 'owner_ai' })).id, 1);
 db.prepare("UPDATE outreach SET created_at=datetime('now','-11 minutes') WHERE id=1").run();

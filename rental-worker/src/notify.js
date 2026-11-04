@@ -56,10 +56,12 @@ export async function getOutreach(env, { outreach_id, phone, kind, interaction_i
   let r;
   if (outreach_id) r = await env.DB.prepare('SELECT * FROM outreach WHERE id=?').bind(outreach_id).first();
   else if (interaction_id) r = await env.DB.prepare('SELECT * FROM outreach WHERE interaction_id=?').bind(interaction_id).first();
-  else if (phone && ['owner_ai', 'tenant_ai'].includes(kind)) {
+  else if (phone && (!kind || ['owner_ai', 'tenant_ai'].includes(kind))) {
     // A destination number is only a demo routing hint, not proof of identity. Refuse
     // ambiguous, stale and dry-run records instead of selecting an arbitrary caller.
-    const rows = await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind=? AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone, kind).all();
+    const rows = kind
+      ? await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind=? AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone, kind).all()
+      : await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind IN ('owner_ai','tenant_ai') AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone).all();
     if (rows.results.length === 1) r = rows.results[0];
   }
   return r ? { ...r, briefing: j(r.briefing) } : null;
