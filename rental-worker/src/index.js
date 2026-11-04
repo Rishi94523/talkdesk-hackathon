@@ -22,7 +22,7 @@ function makeServer(env) {
 
   // ---- Intake agent tools ----
   tool('get_current_time', 'Current date/time in India (IST). Call before computing visit times.', {}, async () => ({ now_ist: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' }), now_iso: new Date().toISOString() }));
-  tool('save_tenant_profile', 'Store/merge the tenant\'s details and preferences (budget, deposit limit, BHK, localities, amenities). Call as soon as you learn something new.', { phone, name: z.string().max(80).optional(), whatsapp_ok: z.boolean().optional().describe('Tenant agreed to WhatsApp/SMS messages'), ...criteria, move_in_date: z.string().max(40).optional(), pets: z.boolean().optional(), notes: z.string().max(500).optional() },
+  tool('save_tenant_profile', 'Store/merge the tenant\'s details and preferences (budget, deposit limit, BHK, localities, amenities). Call as soon as you learn something new.', { phone, name: z.string().max(80).optional(), whatsapp_ok: z.boolean().optional().describe('Tenant agreed to receive phone calls from the assistant'), ...criteria, move_in_date: z.string().max(40).optional(), pets: z.boolean().optional(), notes: z.string().max(500).optional() },
     async ({ phone: p, name, whatsapp_ok, ...prefs }) => ({ profile: await saveProfile(env, normPhone(p), name, prefs, whatsapp_ok) }));
   tool('get_tenant_profile', 'Fetch the saved profile, wishlist, visits and deals for a returning caller.', { phone }, async ({ phone: p }) => {
     const n = normPhone(p);
@@ -62,24 +62,24 @@ function makeServer(env) {
     });
 
   // ---- Visit scheduler agent tools ----
-  tool('schedule_visit', 'Arrange a property viewing with the owner. If the visit is 24h+ away the owner is messaged (WhatsApp/SMS) first and auto-called if silent; if sooner, the owner is called immediately. Owner phone must be supplied (portal listings omit it; ask the tenant or find it on the listing page).', { phone, listing_id: z.string().max(60), owner_phone: z.string().min(8).max(20), owner_name: z.string().max(80).optional(), requested_time: z.string().describe('ISO 8601 with offset, e.g. 2026-11-07T11:00:00+05:30'), notes: z.string().max(300).optional() }, a => scheduleVisit(env, a));
+  tool('schedule_visit', 'Arrange a property viewing with the owner. The owner is phoned right away (keypad: 1 confirm, 2 decline) and re-called once if unanswered; the tenant is phoned with the result. Owner phone must be supplied (portal listings omit it; ask the tenant or find it on the listing page).', { phone, listing_id: z.string().max(60), owner_phone: z.string().min(8).max(20), owner_name: z.string().max(80).optional(), requested_time: z.string().describe('ISO 8601 with offset, e.g. 2026-11-07T11:00:00+05:30'), notes: z.string().max(300).optional() }, a => scheduleVisit(env, a));
   tool('get_visit_status', 'Check a visit request (pending / confirmed / declined / needs_attention) and any owner replies.', { visit_id: z.number().int() }, async ({ visit_id }) => ({ visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() }));
   tool('record_owner_response', 'Record the owner\'s answer when you obtained it yourself on a call. Notifies the tenant.', { visit_id: z.number().int(), outcome: z.enum(['yes', 'no', 'other']), details: z.string().max(300).optional() }, ({ visit_id, outcome, details }) => applyOwnerResponse(env, visit_id, outcome, details));
-  tool('simulate_owner_reply', 'DEMO ONLY: simulate an owner\'s WhatsApp/SMS reply to a visit request (as if the webhook fired).', { visit_id: z.number().int(), text: z.string().max(200) },
+  tool('simulate_owner_reply', 'DEMO ONLY: simulate the owner answering a visit-request call (yes/no text).', { visit_id: z.number().int(), text: z.string().max(200) },
     async ({ visit_id, text }) => applyOwnerResponse(env, visit_id, parseReply(text), text));
 
   // ---- Alert agent tools ----
-  tool('create_listing_alert', 'Watch for NEW listings matching criteria; every 10 min the system checks and alerts the tenant by WhatsApp/SMS (and optionally a phone call for a near-perfect match). Requires the tenant\'s consent.', { phone, ...criteria, channel: z.enum(['whatsapp', 'sms']).default('whatsapp'), call_if_urgent: z.boolean().default(false), consent: z.boolean().describe('Tenant explicitly agreed to alerts') },
-    async ({ phone: p, channel, call_if_urgent, consent, ...c }) => {
+  tool('create_listing_alert', 'Watch for NEW listings matching criteria; every 10 min the system checks and phones the tenant about new matches. Requires the tenant\'s consent.', { phone, ...criteria, consent: z.boolean().describe('Tenant explicitly agreed to alerts') },
+    async ({ phone: p, consent, ...c }) => {
       if (!consent) return { error: 'Need tenant consent before creating alerts.' };
-      const r = await env.DB.prepare('INSERT INTO alerts(phone,criteria,channel,call_if_urgent) VALUES(?,?,?,?)').bind(normPhone(p), JSON.stringify(c), channel, Number(call_if_urgent)).run();
+      const r = await env.DB.prepare('INSERT INTO alerts(phone,criteria,channel,call_if_urgent) VALUES(?,?,?,?)').bind(normPhone(p), JSON.stringify(c), 'call', 0).run();
       return { alert_id: r.meta.last_row_id, status: 'active', note: 'First check records current listings as a baseline; only listings that appear afterwards trigger alerts.' };
     });
   tool('list_listing_alerts', 'List a tenant\'s alerts.', { phone }, async ({ phone: p }) => ({ alerts: (await env.DB.prepare('SELECT id,criteria,channel,call_if_urgent,active,last_run FROM alerts WHERE phone=?').bind(normPhone(p)).all()).results.map(a => ({ ...a, criteria: j(a.criteria) })) }));
   tool('cancel_listing_alert', 'Stop an alert.', { alert_id: z.number().int(), phone }, async ({ alert_id, phone: p }) => { await env.DB.prepare('UPDATE alerts SET active=0 WHERE id=? AND phone=?').bind(alert_id, normPhone(p)).run(); return { ok: true }; });
   tool('run_alert_check_now', 'Run the new-listing check immediately (normally scheduled).', {}, async () => ({ report: await runAlerts(env) }));
-  tool('notify_tenant', 'Send the tenant a WhatsApp/SMS message (summaries, links, visit confirmations).', { phone, message: z.string().min(1).max(900), channel: z.enum(['whatsapp', 'sms']).optional() },
-    async ({ phone: p, message, channel }) => send(env, { channel: channel || defaultChannel(env), to: normPhone(p), body: message, ref_type: 'tenant' }));
+  tool('call_tenant', 'Place a short outbound phone call to the tenant that reads out a message (follow-up or reminder). Under 300 characters, plain speech, no URLs.', { phone, message: z.string().min(1).max(400) },
+    async ({ phone: p, message }) => send(env, { channel: 'call', to: normPhone(p), body: message, ref_type: 'tenant' }));
 
   // ---- Negotiator / closer agent tools ----
   tool('negotiation_brief', 'Rent and deposit negotiation plan for a listing: market comparison, opening offer, target, walk-away, leverage, owner script, safety checklist. Pass research red flags you found.', { listing_id: z.string().max(60), max_rent: z.number().int().positive().optional(), max_deposit_months: z.number().min(1).max(12).optional(), red_flags: z.array(z.string().max(200)).max(6).optional(), lease_months: z.number().int().min(1).max(36).default(11) },

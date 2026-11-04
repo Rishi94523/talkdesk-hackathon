@@ -29,19 +29,14 @@ export async function scheduleVisit(env, a) {
   const phone = normPhone(a.phone), owner = normPhone(a.owner_phone);
   const prof = await getProfile(env, phone);
   const tenant = prof?.name || 'a prospective tenant';
-  const mode = leadH >= 24 ? 'message_first' : 'call_now';
+  const mode = 'call_now';
   const ins = await env.DB.prepare('INSERT INTO visits(phone,listing_id,owner_name,owner_phone,requested_time,channel,notes) VALUES(?,?,?,?,?,?,?)')
     .bind(phone, a.listing_id, a.owner_name ?? null, owner, when.toISOString(), mode, a.notes ?? null).run();
   const id = ins.meta.last_row_id;
   const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.locality || ''}`.trim();
-  const text = `Hello${a.owner_name ? ' ' + a.owner_name : ''}, this is the rental assistant for ${tenant}. They would like to view your ${place} property on ${fmtTime(when)}. Reply YES to confirm, NO if unavailable, or send another time. (Ref V${id})`;
-  const sent = [await send(env, { channel: defaultChannel(env), to: owner, body: text, ref_type: 'visit', ref_id: id })];
-  if (mode === 'call_now') {
-    const base = env.PUBLIC_URL || 'https://mergeconflicts-rentals-mcp.kelgis.workers.dev';
-    sent.push(await send(env, { channel: 'call', to: owner, body: `Hello. This is the rental assistant for ${tenant}. They would like to view your ${place} property on ${fmtTime(when)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: id, voice_action: `${base}/webhook/twilio/voice?visit=${id}` }));
-    await env.DB.prepare('UPDATE visits SET escalated=1 WHERE id=?').bind(id).run();
-  }
-  return { visit_id: id, status: 'pending', strategy: mode === 'message_first' ? `Visit is ${Math.round(leadH)}h away: owner messaged first; will auto-call if no reply in ${env.ESCALATE_MIN || 120} min.` : `Visit is only ${Math.round(leadH)}h away: owner is being called now, message sent as backup.`, sent };
+  const base = env.PUBLIC_URL || 'https://mergeconflicts-rentals-mcp.kelgis.workers.dev';
+  const sent = [await send(env, { channel: 'call', to: owner, body: `Hello${a.owner_name ? ' ' + a.owner_name : ''}. This is the rental assistant for ${tenant}. They would like to view your ${place} property on ${fmtTime(when)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: id, voice_action: `${base}/webhook/twilio/voice?visit=${id}` })];
+  return { visit_id: id, status: 'pending', strategy: `Owner is being called now (visit is ${Math.round(leadH)}h away); if unanswered the call is retried once after ${env.ESCALATE_MIN || 30} min.`, sent };
 }
 
 export async function applyOwnerResponse(env, visitId, outcome, text) {
@@ -52,8 +47,8 @@ export async function applyOwnerResponse(env, visitId, outcome, text) {
   const listing = await getListing(env, v.listing_id);
   const place = listing ? `${listing.bhk} BHK in ${listing.locality}` : v.listing_id;
   const msg = status === 'confirmed' ? `Good news: the owner confirmed your visit to the ${place} on ${fmtTime(v.requested_time)}.`
-    : status === 'declined' ? `The owner can't do ${fmtTime(v.requested_time)} for the ${place}. Reply with another time and I'll ask again.`
-    : `The owner replied about the ${place}: "${(text || '').slice(0, 160)}". Tell me how to respond.`;
+    : status === 'declined' ? `The owner can't do ${fmtTime(v.requested_time)} for the ${place}. Call back with another time and I'll ask again.`
+    : `The owner said something about the ${place} that needs your attention: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
   const note = await send(env, { channel: defaultChannel(env), to: v.phone, body: msg, ref_type: 'visit', ref_id: visitId });
   return { visit_id: visitId, status, tenant_notified: note };
@@ -153,23 +148,21 @@ export async function runAlerts(env) {
     await env.DB.prepare('UPDATE alerts SET last_run=CURRENT_TIMESTAMP WHERE id=?').bind(al.id).run();
     if (baseline || !fresh.length) { report.push({ alert: al.id, new: baseline ? 0 : fresh.length, baseline }); continue; }
     const top = fresh.slice(0, 3);
-    const body = `${fresh.length} new listing(s) matching your search:\n` + top.map(l => `• ${l.bhk} BHK ${l.locality} ${inr(l.rent)}/mo, deposit ${inr(l.deposit)} (${l.match_score}% match) ${l.url || ''}`).join('\n') + '\nReply or call to book a visit.';
-    const ch = al.channel === 'sms' ? 'sms' : defaultChannel(env);
-    const sent = [await send(env, { channel: ch, to: al.phone, body, ref_type: 'alert', ref_id: al.id })];
-    if (al.call_if_urgent && top[0].match_score >= 90) sent.push(await send(env, { channel: 'call', to: al.phone, body: `New listing alert. A ${top[0].bhk} BHK in ${top[0].locality} for ${top[0].rent} rupees a month just appeared and matches your search closely. I have sent the details by message.`, ref_type: 'alert', ref_id: al.id }));
+    const body = `New listing alert. ${fresh.length} new place${fresh.length > 1 ? 's' : ''} match your search. ` + top.map(l => `A ${l.bhk} BHK in ${l.locality} for ${l.rent} rupees a month with a deposit of ${l.deposit}`).join('. Also, ') + '. Call us back to hear more or book a visit.';
+    const sent = [await send(env, { channel: 'call', to: al.phone, body, ref_type: 'alert', ref_id: al.id })];
     report.push({ alert: al.id, new: fresh.length, sent });
   }
   return report;
 }
 
 export async function escalateVisits(env) {
-  const mins = +(env.ESCALATE_MIN || 120);
+  const mins = +(env.ESCALATE_MIN || 30);
   const rows = (await env.DB.prepare("SELECT * FROM visits WHERE status='pending' AND escalated=0 AND created_at <= datetime('now', ?)").bind(`-${mins} minutes`).all()).results;
   const base = env.PUBLIC_URL || 'https://mergeconflicts-rentals-mcp.kelgis.workers.dev';
   const out = [];
   for (const v of rows) {
     const l = await getListing(env, v.listing_id);
-    out.push(await send(env, { channel: 'call', to: v.owner_phone, body: `Hello. We messaged you earlier about a viewing of your ${l?.locality || ''} property on ${fmtTime(v.requested_time)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: v.id, voice_action: `${base}/webhook/twilio/voice?visit=${v.id}` }));
+    out.push(await send(env, { channel: 'call', to: v.owner_phone, body: `Hello. We called you earlier about a viewing of your ${l?.locality || ''} property on ${fmtTime(v.requested_time)}. Press 1 to confirm, or 2 if that time does not work.`, ref_type: 'visit', ref_id: v.id, voice_action: `${base}/webhook/twilio/voice?visit=${v.id}` }));
     await env.DB.prepare('UPDATE visits SET escalated=1 WHERE id=?').bind(v.id).run();
   }
   return out;
