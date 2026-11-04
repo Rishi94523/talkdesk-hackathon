@@ -15,6 +15,17 @@ import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply,
 //   Tenant callback (outbound): call_context, tenant, listings, visits, research
 const nowIst = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' });
 const opt = z.string().max(100).optional();
+// Talkdesk fills the action from an LLM-extracted variable, so accept loose wording and infer from the inputs.
+export function dealAction(raw, t = {}) {
+  const a = String(raw || '').toLowerCase();
+  if (['update', 'draft_agreement', 'call_tenant_later', 'negotiate_owner', 'communicate_intent'].includes(a)) return a;
+  if (/intent|sign|go ahead|proceed|rent it|move/.test(a)) return 'communicate_intent';
+  if (/negot|offer|counter|accept/.test(a)) return 'negotiate_owner';
+  if (t.offer) return 'negotiate_owner';
+  if (t.move_in_date) return 'communicate_intent';
+  return null;
+}
+
 const spokenTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
 // A short spoken recap of the caller's open threads so a returning call can continue where it left off.
 async function callerRecap(env, visits, deals) {
@@ -36,7 +47,7 @@ async function callerRecap(env, visits, deals) {
 
 function makeServer(env) {
   const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
-  const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['action', 'phone'], call_context: ['action'], owner_response: ['outcome'] };
+  const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['phone'], call_context: ['action'], owner_response: ['outcome'] };
   const tool = (name, description, shape, fn, required = REQ[name] || []) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
     const missing = required.filter(k => a[k] == null || a[k] === '');
     if (missing.length) return fail('Missing required: ' + missing.join(', '));
@@ -163,7 +174,7 @@ function makeServer(env) {
 
   // ---------------------------------------------------------------- deal
   tool('deal', 'Deal tracking. Actions: update; negotiate_owner (phone, listing_id, offer and explicit max_rent and/or max_deposit); communicate_intent (phone, listing_id, move_in_date); draft_agreement; call_tenant_later. Owner outreach is a separate two-way AI call; never promise the call or agreement succeeded unless its result confirms it.', {
-    action: z.enum(['update', 'draft_agreement', 'call_tenant_later', 'negotiate_owner', 'communicate_intent']).optional(),
+    action: z.string().max(40).optional().describe('negotiate_owner (send an offer or accept a counter-offer) or communicate_intent (tenant wants to go ahead and rent); also update, draft_agreement, call_tenant_later'),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
     terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
     landlord_name: z.string().max(100).optional(), tenant_name: z.string().max(100).optional(), property_address: z.string().max(300).optional(),
@@ -171,8 +182,10 @@ function makeServer(env) {
     months: z.number().int().min(1).max(60).optional(), maintenance: z.number().int().min(0).optional(), lock_in_months: z.number().int().min(0).optional(),
     notice_months: z.number().int().min(0).optional(), escalation_pct: z.number().min(0).max(20).optional(), extra_terms: z.array(z.string().max(200)).max(8).optional(),
     purpose: z.string().max(400).optional(), offer: z.string().max(400).optional(), max_rent: z.number().int().positive().optional(), max_deposit: z.number().int().positive().optional(), move_in_date: z.string().max(40).optional(), notes: z.string().max(400).optional(),
-  }, async ({ action, phone: p, listing_id, stage, terms, purpose, ...t }) => {
+  }, async ({ action: rawAction, phone: p, listing_id, stage, terms, purpose, ...t }) => {
     const n = normPhone(p);
+    const action = dealAction(rawAction, t);
+    if (!action) return { error: 'Say whether this is an offer (negotiate_owner) or the tenant going ahead (communicate_intent).' };
     if (action === 'call_tenant_later') return callTenant(env, { phone: n, purpose: purpose || 'Follow-up' });
     if (!listing_id && (action === 'negotiate_owner' || action === 'communicate_intent')) listing_id = (await env.DB.prepare("SELECT listing_id FROM visits WHERE phone=? AND status NOT IN ('cancelled') ORDER BY id DESC LIMIT 1").bind(n).first())?.listing_id;
     if (!listing_id) return { error: 'listing_id required' };

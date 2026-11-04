@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { dealAction } from './src/index.js';
+assert.equal(dealAction('negotiate_owner'), 'negotiate_owner');
+assert.equal(dealAction('communicate_intent'), 'communicate_intent');
+assert.equal(dealAction('accept counter offer'), 'negotiate_owner');
+assert.equal(dealAction('sign / go ahead'), 'communicate_intent');
+assert.equal(dealAction('', { offer: 'rent 36000' }), 'negotiate_owner');
+assert.equal(dealAction(undefined, { move_in_date: '1 December' }), 'communicate_intent');
+assert.equal(dealAction('', {}), null);
+console.log('PASS deal action inference');

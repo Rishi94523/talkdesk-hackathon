@@ -100,11 +100,17 @@ export async function recordOwnerDiscussion(env, outreach, { outcome, details, q
   const listingId = briefing.listing?.id;
   if (!listingId || !outreach.tenant_phone) return { error: 'Outreach is missing its tenant or property.' };
   const note = (details || outcome).slice(0, 400);
-  await updateDeal(env, outreach.tenant_phone, listingId, null, { owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}) });
+  const nego = outreach.purpose === 'negotiation';
+  const stage = nego ? (outcome === 'yes' ? 'offer_made' : 'negotiating') : null;
+  await updateDeal(env, outreach.tenant_phone, listingId, stage, { owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}),
+    ...(nego && outcome === 'yes' ? { owner_accepted_offer: briefing.tenant_offer || note } : {}), ...(!nego && outcome === 'yes' ? { owner_agreed_to_proceed: true } : {}) });
   await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(`Owner response (${outcome}): ${note}`.slice(0, 500), outreach.id).run();
   const what = outreach.purpose === 'negotiation' ? `your offer${briefing.tenant_offer ? ' of ' + briefing.tenant_offer : ''}` : 'your intention to rent';
   const said = { yes: 'accepted', no: 'did not accept', other: 'replied' }[outcome] || outcome;
-  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `${outreach.purpose === 'negotiation' ? 'Negotiation' : 'Rental intent'} update: the owner ${said} ${what} for ${briefing.listing?.title || 'the property'}${details && details !== outcome ? ': ' + details.slice(0, 200) : ''}. Tell the tenant exactly this, discuss their next step, and do not claim an agreement beyond what the owner said.`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: 'Explain the owner response accurately and discuss the tenant’s next step.' } });
+  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `${outreach.purpose === 'negotiation' ? 'Negotiation' : 'Rental intent'} update: the owner ${said} ${what} for ${briefing.listing?.title || 'the property'}${details && details !== outcome ? ': ' + details.slice(0, 200) : ''}. Tell the tenant exactly this, discuss their next step, and do not claim an agreement beyond what the owner said.`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: nego
+    ? (outcome === 'yes' ? 'The owner accepted the offer. Ask whether the tenant wants to go ahead and rent; if yes, ask their move-in date and call deal with action communicate_intent.'
+      : 'Ask whether the tenant accepts the owner\'s counter-offer, wants to make a new offer (ask for the new offer and their maximum), or wants to stop. To accept, call deal with action negotiate_owner, offer "tenant accepts your counter-offer of <amount>" and max_rent equal to that amount; for a new offer, call deal with action negotiate_owner and their new offer and maximum.')
+    : (outcome === 'yes' ? 'The owner agreed to proceed. Tell the tenant the owner will share the agreement and next steps; nothing is signed yet.' : 'Explain the owner response and ask what the tenant would like to do next.') } });
   return { recorded: true, outcome, tenant_call };
 }
 
