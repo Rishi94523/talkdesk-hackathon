@@ -1,4 +1,5 @@
 import { LOCALITIES, CITY, tmo, median, pct, j } from './util.js';
+import { apiShFetch } from './apish_cache.js';
 
 export const DEMO = [
   { id: 'MC-001', locality: 'Whitefield', bhk: 2, rent: 32000, deposit: 150000, furnishing: 'semi', parking: 'car', features: 'Near metro; covered parking' },
@@ -35,7 +36,7 @@ export async function searchNoBroker(env, { locality, bhk, city = 'bangalore', p
   const u = new URL('https://api.api.sh/nobroker/v1/search');
   u.search = new URLSearchParams({ city, kind: 'rent', ...(bhk ? { bhk } : {}), lat: c[0], lon: c[1], page }).toString();
   try {
-    const res = await fetch(u, { headers: { 'x-api-key': env.API_SH, Accept: 'application/json' }, signal: tmo(25000) });
+    const res = await apiShFetch(env, u, { headers: { 'x-api-key': env.API_SH, Accept: 'application/json' }, signal: tmo(25000) });
     if (!res.ok) return { error: 'NoBroker search failed: HTTP ' + res.status, results: [] };
     const d = await res.json();
     return { total: d.total, results: (d.results || []).map(normNoBroker) };
