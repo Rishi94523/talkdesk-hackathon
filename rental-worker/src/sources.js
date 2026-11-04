@@ -22,8 +22,8 @@ export function normNoBroker(r) {
     id: 'nb-' + r.id, source: 'nobroker', url: r.url, title: r.title, locality: r.nb_locality || r.locality, street: r.street,
     bhk: parseInt(r.type) || null, rent: r.rent, deposit: r.deposit, negotiable: r.negotiable, maintenance: r.maintenance,
     maintenance_included: r.maintenance_included, size_sqft: r.size_sqft, floor: r.floor, total_floors: r.total_floors,
-    furnishing: fur(r.furnishing), parking: (r.parking || 'none').toString().toLowerCase(), lift: !!r.lift, gym: !!r.gym,
-    swimming_pool: !!r.swimming_pool, amenities: r.amenities || [], available_from: r.available_from, posted: r.created,
+    furnishing: fur(r.furnishing), parking: r.parking == null ? null : String(r.parking).toLowerCase(), lift: r.lift == null ? null : !!r.lift, gym: r.gym == null ? null : !!r.gym,
+    swimming_pool: r.swimming_pool == null ? null : !!r.swimming_pool, amenities: r.amenities || [], available_from: r.available_from, posted: r.created,
     updated: r.updated, lat: r.latitude, lon: r.longitude, image: r.image, verified: r.verified ?? false,
     note: 'Third-party portal listing: may be stale; owner contact not provided; verify before paying anything.',
   };
@@ -49,6 +49,8 @@ export function score(l, p = {}) {
   if (p.bhk && l.bhk !== p.bhk) { s -= 25; miss.push(`${l.bhk} BHK`); }
   for (const a of p.amenities || []) {
     const k = a.toLowerCase();
+    const unknown = k.includes('park') ? l.parking == null : k.includes('gym') ? l.gym == null : k.includes('pool') ? l.swimming_pool == null : k.includes('lift') ? l.lift == null : false;
+    if (unknown) { s -= 4; miss.push(a + ' not specified'); continue; }
     const has = k.includes('park') ? l.parking && l.parking !== 'none' : k.includes('gym') ? l.gym : k.includes('pool') ? l.swimming_pool : k.includes('lift') ? l.lift : (l.amenities || []).join(' ').toLowerCase().includes(k) || (l.features || '').toLowerCase().includes(k);
     if (!has) { s -= 8; miss.push('no ' + a); }
   }

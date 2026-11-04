@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { showcaseListing, findListings } from './src/sources.js';
+import { showcaseListing, findListings, normNoBroker, score } from './src/sources.js';
 
 const saved = new Map();
 const env = { DB: {
@@ -20,4 +20,9 @@ for (const area of ['Whitefield', 'Koramangala']) {
 }
 const alert = await findListings(env, { locality: 'Whitefield' });
 assert.equal(alert.results.some(x => x.is_showcase), false);
+const unknown = normNoBroker({ id: 'example' });
+assert.equal(unknown.lift, null);
+assert.equal(unknown.gym, null);
+assert.equal(unknown.parking, null);
+assert.deepEqual(score(unknown, { amenities: ['gym'] }).mismatches, ['gym not specified']);
 console.log('PASS adaptive showcase, mismatch disclosure, secret isolation and alert exclusion');
