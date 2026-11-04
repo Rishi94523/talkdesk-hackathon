@@ -163,13 +163,14 @@ function makeServer(env) {
   });
 
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
-    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
+    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), owner_phone: z.string().max(20).optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
-  }, async ({ visit_id, outreach_id, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only }) => {
+  }, async ({ visit_id, outreach_id, owner_phone, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only }) => {
     const responseEnv = dry_run_only ? { ...env, TD_FLOW_TENANT_AI: null } : env;
-    if (outreach_id) {
-      const outreach = await getOutreach(env, { outreach_id });
+    if (outreach_id || owner_phone) {
+      const outreach = await getOutreach(env, { outreach_id, phone: owner_phone ? normPhone(owner_phone) : null, kind: 'owner_ai' });
       if (!outreach) return { error: 'Outreach not found; do not record an owner response.' };
+      if (outreach.kind !== 'owner_ai') return { error: 'Outreach is not an owner call.' };
       if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(responseEnv, outreach, { outcome, details, quoted_rent, quoted_deposit });
       visit_id ||= outreach?.visit_id;
     }
