@@ -1,0 +1,12 @@
+{
+  // Public website for the MergeConflicts rental concierge. Separate Worker from rental-worker/ (the MCP server).
+  "name": "mergeconflicts-rentals-site",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-02",
+  "workers_dev": true,
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  // Same D1 database as the MCP server. The site only ever runs SELECT queries on it.
+  "d1_databases": [{ "binding": "DB", "database_name": "mergeconflicts-rentals-demo", "database_id": "8d31ce9d-8a67-4a7d-a1ca-1c9ec1ffa09f" }],
+  // Phone number of the Talkdesk concierge line, shown on the site. Leave empty to hide the call button.
+  "vars": { "CONCIERGE_PHONE": "+1 272 269 3171" }
+}
