@@ -89,6 +89,30 @@ export async function getListing(env, id) {
   return r ? j(r.data) : null;
 }
 
+
+// Portal data includes lease listings with no monthly rent, lakh-scale lease amounts and implausible sizes.
+const MIN_SQFT = { 1: 350, 2: 650, 3: 950, 4: 1300, 5: 1600 };
+export function plausibleListing(l) {
+  if (!l.rent || l.rent < 8000 || l.rent > 500000) return false;
+  if (/\blease\b/i.test(l.title || '')) return false;
+  if (l.size_sqft && l.bhk && l.size_sqft < (MIN_SQFT[l.bhk] || 0)) return false;
+  return true;
+}
+// Prefer well-kept apartments in a society near the tenant's budget over the cheapest standalone houses.
+export function qualityScore(l, c = {}) {
+  let q = 0;
+  const t = `${l.title || ''} ${l.street || ''}`.toLowerCase();
+  if (l.lift) q += 10; if (l.gym) q += 10; if (l.swimming_pool) q += 10;
+  if (l.parking && l.parking !== 'none') q += 4;
+  if (/apartment|residen|society|enclave|heights|towers|gardens|homes|villa/.test(t)) q += 8;
+  if (/stand ?alone|independent house|house for rent/.test(t)) q -= 8;
+  if (l.furnishing === 'semi' || l.furnishing === 'full') q += 4;
+  if (l.verified) q += 6;
+  if (l.size_sqft && l.bhk) q += Math.max(-10, Math.min(10, Math.round((l.size_sqft / (MIN_SQFT[l.bhk] || 650) - 1.4) * 15)));
+  if (c.max_rent && l.rent) { const r = l.rent / c.max_rent; q += r >= 0.7 && r <= 1.05 ? 12 : r >= 0.5 ? 4 : -10; }
+  return q;
+}
+
 export async function findListings(env, c, { includeDemo = false, includeShowcase = false } = {}) {
   const nb = await searchNoBroker(env, c);
   let list = nb.results;
@@ -97,10 +121,12 @@ export async function findListings(env, c, { includeDemo = false, includeShowcas
   await cacheListings(env, list);
   const want = c.locality?.toLowerCase();
   const ranked = list
+    .filter(l => l.is_showcase || plausibleListing(l))
+    .filter(l => l.is_showcase || !c.max_rent || l.rent >= c.max_rent * 0.4) // far below budget is usually bad data or a different market
     .filter(l => l.is_showcase || !c.bhk || l.bhk === c.bhk)
     .filter(l => l.is_showcase || !c.max_rent || l.rent <= c.max_rent * 1.1)
-    .map(l => ({ ...l, ...score(l, c), locality_match: want ? (l.locality || '').toLowerCase().includes(want) : null }))
-    .sort((a, b) => Number(b.is_showcase || 0) - Number(a.is_showcase || 0) || b.match_score - a.match_score || a.rent - b.rent);
+    .map(l => ({ ...l, ...score(l, c), quality: qualityScore(l, c), locality_match: want ? (l.locality || '').toLowerCase().includes(want) : null }))
+    .sort((a, b) => Number(b.is_showcase || 0) - Number(a.is_showcase || 0) || b.match_score - a.match_score || b.quality - a.quality || b.rent - a.rent);
   return { total_on_portal: nb.total, warning: nb.error, results: ranked };
 }
 

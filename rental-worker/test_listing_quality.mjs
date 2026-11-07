@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { plausibleListing, qualityScore } from './src/sources.js';
+const base = { source: 'nobroker', bhk: 2, rent: 35000, size_sqft: 1100, title: '2 BHK Flat In Prestige Apartment for Rent' };
+assert.equal(plausibleListing(base), true);
+assert.equal(plausibleListing({ ...base, rent: 0 }), false);
+assert.equal(plausibleListing({ ...base, rent: 1800000 }), false);
+assert.equal(plausibleListing({ ...base, title: '2 BHK Flat for Lease In Marathahalli' }), false);
+assert.equal(plausibleListing({ ...base, size_sqft: 300 }), false);
+const good = qualityScore({ ...base, lift: true, gym: true, furnishing: 'semi' }, { max_rent: 40000 });
+const poor = qualityScore({ ...base, rent: 16000, size_sqft: 700, title: '2 BHK House for Rent In Whitefield', lift: false }, { max_rent: 40000 });
+assert.ok(good > poor, `${good} > ${poor}`);
+console.log('PASS listing plausibility and quality ranking');
