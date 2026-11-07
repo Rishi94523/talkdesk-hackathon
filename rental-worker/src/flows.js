@@ -1,4 +1,4 @@
-import { placeCall, callStarted } from './notify.js';
+import { placeCall, callStarted, noteOnCall } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
 import { j, normPhone, parseSpokenTime, normOutcome } from './util.js';
 import { getMemory, recordProperty } from './memory.js';
@@ -90,6 +90,7 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
   if (reply === 'accept') {
     if (!['owner_proposed_time', 'confirmed'].includes(v.status)) return { error: `There is no time from the owner to accept (visit status: ${v.status}). Ask the tenant for a time and call visits with action propose_time and requested_time.` };
     await confirmProposedTime(env, v.id);
+    await noteOnCall(env, { tenant_phone: v.phone, kind: 'tenant_ai', visit_id: v.id, text: `Tenant agreed to the owner's time, ${fmtTime(v.requested_time)}. Viewing booked.` });
     const call = await placeCall(env, { kind: 'owner_ai', to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing confirmation for listing ${v.listing_id}`, briefing: {
       role: 'You are calling the PROPERTY OWNER back on behalf of the tenant.', task: 'viewing_confirmation', visit_id: v.id,
       spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, this is the MergeConflicts rental assistant calling back about the viewing of your ${place}.`,
@@ -103,6 +104,7 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
   if (reply === 'propose') {
     if (!proposed || new Date(proposed) < Date.now()) return { error: 'Ask the tenant for a specific future day and time, then call visits again with action propose_time and requested_time.' };
     const ownerTime = v.status === 'owner_proposed_time' ? fmtTime(v.requested_time) : null;
+    await noteOnCall(env, { tenant_phone: v.phone, kind: 'tenant_ai', visit_id: v.id, text: `Tenant ${ownerTime ? `cannot make ${ownerTime} and ` : ''}asked for ${fmtTime(proposed)} instead.` });
     await env.DB.prepare("UPDATE visits SET status='pending', requested_time=?, notes=COALESCE(notes||char(10),'')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
       .bind(proposed, `Tenant proposed ${proposed}${text ? ': ' + text : ''}`.slice(0, 300), v.id).run();
     const call = await callOwner(env, v.id, 'owner_ai', `${ownerTime ? `The tenant cannot make ${ownerTime}. ` : ''}The tenant would like to view the ${place} on ${fmtTime(proposed)} instead. Ask whether that works.`);
@@ -111,6 +113,7 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
   }
   if (reply === 'decline') {
     await env.DB.prepare("UPDATE visits SET status='cancelled', notes=COALESCE(notes||char(10),'')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(`Tenant declined${text ? ': ' + text : ''}`.slice(0, 300), v.id).run();
+    await noteOnCall(env, { tenant_phone: v.phone, kind: 'tenant_ai', visit_id: v.id, text: `Tenant cancelled the viewing${text ? ': ' + text : ''}.` });
     return { visit_id: v.id, status: 'cancelled', say: 'Tell the tenant the viewing request is cancelled and ask if they would like other options.' };
   }
   return { error: "Say whether the tenant accepts the owner's time (accept_owner_time), proposes another time (propose_time with requested_time), or wants to cancel." };
@@ -127,6 +130,7 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
   if (purpose === 'signing_intent' && !move_in_date) return { error: 'Ask the tenant for their preferred move-in date before informing the owner.' };
   await updateDeal(env, tenantPhone, listing_id, purpose === 'negotiation' ? 'negotiating' : null, { ...(offer ? { tenant_offer: offer } : {}), ...(max_rent ? { authorized_max_rent: max_rent } : {}), ...(max_deposit ? { authorized_max_deposit: max_deposit } : {}), ...(move_in_date ? { proposed_move_in_date: move_in_date } : {}), ...(notes ? { tenant_instructions: notes } : {}) });
   const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || 'property'} in ${listing.locality || 'Bengaluru'}`;
+  await noteOnCall(env, { tenant_phone: tenantPhone, kind: 'tenant_ai', text: purpose === 'negotiation' ? `Tenant's answer: ${offer}.` : `Tenant wants to go ahead and rent, moving in around ${move_in_date}.` });
   const ask = purpose === 'negotiation'
     ? `The tenant${visit.status === 'confirmed' ? ', who has a viewing arranged,' : ''} would like to discuss the terms: they offer ${offer}.`
     : `The tenant would like to go ahead and rent it, moving in around ${move_in_date}.`;
@@ -173,7 +177,9 @@ export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome
 // in our own concierge, so those callbacks ring the Talkdesk callback line (answered in the agent app) instead.
 export function callbackDestination(env, phone) {
   const internal = String(env.TALKDESK_ORIGIN_NUMBERS || '').split(',').map(x => x.trim()).filter(Boolean);
-  return env.CALLBACK_RING_NUMBER && internal.includes(phone) ? env.CALLBACK_RING_NUMBER : phone;
+  // Demo testers are in India, so any US (+1) Caller ID is a Talkdesk line or simulator, never a reachable tenant.
+  const redirect = internal.includes(phone) || String(phone || '').startsWith('+1');
+  return env.CALLBACK_RING_NUMBER && redirect && phone !== env.CALLBACK_RING_NUMBER ? env.CALLBACK_RING_NUMBER : phone;
 }
 
 export async function callTenant(env, { phone, purpose, details = {}, visit_id = null, alert_id = null }) {

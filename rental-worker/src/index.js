@@ -3,7 +3,7 @@ import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
 import { reply, fail, normPhone, j, parseSpokenTime } from './util.js';
 import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES, briefOf, factsOf, webLeadListing, cacheListings } from './sources.js';
-import { getOutreach, dispatchQueued } from './notify.js';
+import { getOutreach, dispatchQueued, conversationThread, touchLine } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
 import { registerLegacy } from './legacy.js';
 import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits, startOwnerDiscussion, recordOwnerDiscussion, resolveVisit, tenantVisitReply } from './flows.js';
@@ -69,6 +69,7 @@ function makeServer(env) {
   const s = new McpServer({ name: 'MergeConflicts Rentals', version: '2.0.0' });
   const REQ = { tenant: ['action', 'phone'], listings: ['action'], research: ['action'], visits: ['action'], deal: ['phone'], call_context: ['action'], owner_response: ['outcome'] };
   const tool = (name, description, shape, fn, required = REQ[name] || []) => s.registerTool(name, { description, inputSchema: z.object(shape) }, async a => {
+    for (const p of [a.phone, a.owner_phone]) if (p) await touchLine(env, normPhone(p)); // this line is still on a call
     const missing = required.filter(k => a[k] == null || a[k] === '');
     if (missing.length) return fail('Missing required: ' + missing.join(', '));
     try { return reply(await fn(a)); } catch (e) { return fail('Tool failed: ' + (e.message || 'unknown').slice(0, 200)); }
@@ -238,7 +239,12 @@ function makeServer(env) {
     const o = await getOutreach(env, { outreach_id, interaction_id, phone: p ? normPhone(p) : null, kind: call_role });
     if (!o) return { error: 'No active outbound call found for that number.' };
     if (call_role && o.kind !== call_role) return { error: 'Outreach role does not match this agent.' };
-    if (action === 'load') { await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('initiating','dialing')").bind(o.id).run(); return { now_ist: nowIst(), outreach: o }; }
+    if (action === 'load') {
+      await env.DB.prepare("UPDATE outreach SET status='in_progress' WHERE id=? AND status IN ('initiating','dialing')").bind(o.id).run();
+      await touchLine(env, o.to_phone);
+      return { now_ist: nowIst(), outreach: o, conversation_so_far: await conversationThread(env, o),
+        how_to_use_thread: 'conversation_so_far lists every earlier call between owner and tenant about this, oldest first: who was called, what was asked and their answer. Use it so the person knows where things stand; this call is the last entry.' };
+    }
     await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(summary || '', o.id).run();
     return { ok: true };
   });

@@ -45,6 +45,7 @@ export async function placeCall(env, { kind, to, tenant_phone = null, owner_phon
   const id = ins.meta.last_row_id;
   if (defer) return { outreach_id: id, kind, to, status: 'queued', note: `The call will be placed about ${callDelaySeconds(env)}-${callDelaySeconds(env) + 60} seconds after this request, once the current call has ended.` };
   let status = 'dry_run', interaction_id = null, error = null;
+  if (ready) await closeEarlierCalls(env, to, id);
   if (ready) {
     try {
       const res = await startFlow(env, flowId, { to_number: to, tenant_number: tenant_phone, owner_number: owner_phone, outreach_id: id, intro: briefing.spoken_intro || purpose });
@@ -59,12 +60,23 @@ export const callDelaySeconds = env => Math.max(0, +(env.CALL_DELAY_SECONDS ?? 6
 export const callStarted = call => ['dialing', 'queued'].includes(call?.status);
 
 // Cron: start queued calls whose delay has elapsed. Each row is claimed atomically so a call is started at most once.
+// Talkdesk does not tell us when a call ends, so the AI's last tool call on a line stands in for it. A queued
+// call to a number waits until that line has been quiet for LINE_QUIET_SECONDS (goodbye plus hang-up), so it
+// never rings a phone that is still on the previous call.
+export async function touchLine(env, phone) {
+  if (!phone) return;
+  try { await env.DB.prepare("INSERT INTO line_activity(phone,at) VALUES(?,CURRENT_TIMESTAMP) ON CONFLICT(phone) DO UPDATE SET at=CURRENT_TIMESTAMP").bind(phone).run(); } catch {}
+}
+export const lineQuietSeconds = env => Math.max(0, +(env.LINE_QUIET_SECONDS ?? 30) || 0);
+
 export async function dispatchQueued(env) {
-  const rows = (await env.DB.prepare("SELECT * FROM outreach WHERE status='queued' AND created_at <= datetime('now', ?) ORDER BY id LIMIT 5").bind(`-${callDelaySeconds(env)} seconds`).all()).results;
+  const rows = (await env.DB.prepare("SELECT * FROM outreach WHERE status='queued' AND created_at <= datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM line_activity la WHERE la.phone=outreach.to_phone AND la.at > datetime('now', ?)) ORDER BY id LIMIT 5")
+    .bind(`-${callDelaySeconds(env)} seconds`, `-${lineQuietSeconds(env)} seconds`).all()).results;
   const out = [];
   for (const o of rows) {
     const claim = await env.DB.prepare("UPDATE outreach SET status='initiating' WHERE id=? AND status='queued'").bind(o.id).run();
     if (!claim.meta.changes) continue;
+    await closeEarlierCalls(env, o.to_phone, o.id);
     const flowId = env[FLOW_ENV[o.kind]];
     let status = 'failed', interaction_id = null, error = null;
     if (!flowId || !env.TALKDESK_CLIENT_ID) error = `Flow for ${o.kind} is no longer configured.`;
@@ -81,6 +93,34 @@ export async function dispatchQueued(env) {
   return out;
 }
 
+// A phone is on one call at a time: starting a call to a number ends any earlier open call to it, so the
+// next agent's context lookup by phone is never ambiguous (the demo tenant and owner share one phone).
+export async function closeEarlierCalls(env, to, id) {
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=COALESCE(summary,'Call ended') WHERE to_phone=? AND id<>? AND status IN ('initiating','dialing','in_progress')").bind(to, id).run();
+}
+
+// The shared thread between owner and tenant: every call about the same viewing or deal, in order,
+// with what was asked and what the other side answered. Each agent loads it with its briefing.
+export async function conversationThread(env, o) {
+  if (!o?.tenant_phone) return [];
+  const rows = (await env.DB.prepare("SELECT id,kind,purpose,briefing,summary,status,created_at FROM outreach WHERE tenant_phone=? AND (visit_id IS ? OR visit_id=? OR purpose IN ('negotiation','signing_intent')) AND created_at >= datetime('now','-2 days') AND status NOT IN ('dry_run','failed') AND id<=? ORDER BY id")
+    .bind(o.tenant_phone, o.visit_id ?? null, o.visit_id ?? -1, o.id).all()).results;
+  return rows.map(r => {
+    const b = j(r.briefing);
+    const asked = b.what_to_say || (r.kind === 'tenant_ai' ? r.purpose : b.goal) || r.purpose;
+    return { call: r.id === o.id ? 'this call' : `call ${r.id}`, with: r.kind === 'owner_ai' ? 'owner' : 'tenant', asked: String(asked || '').slice(0, 300), answer: r.id === o.id ? null : (r.summary || 'no answer recorded') };
+  });
+}
+
+// Record what one side said on the call in progress, so the next call's thread carries it.
+export async function noteOnCall(env, { tenant_phone, kind, visit_id = null, text }) {
+  const q = visit_id
+    ? env.DB.prepare("SELECT id FROM outreach WHERE kind=? AND visit_id=? AND status IN ('dialing','in_progress') ORDER BY id DESC LIMIT 1").bind(kind, visit_id)
+    : env.DB.prepare("SELECT id FROM outreach WHERE kind=? AND tenant_phone=? AND status IN ('dialing','in_progress') ORDER BY id DESC LIMIT 1").bind(kind, tenant_phone);
+  const row = await env.DB.prepare('SELECT id,to_phone FROM outreach WHERE id=?').bind((await q.first())?.id ?? -1).first();
+  if (row) { await env.DB.prepare('UPDATE outreach SET summary=? WHERE id=?').bind(String(text).slice(0, 500), row.id).run(); await touchLine(env, row.to_phone); }
+}
+
 export async function getOutreach(env, { outreach_id, phone, kind, interaction_id }) {
   let r;
   if (outreach_id) r = await env.DB.prepare('SELECT * FROM outreach WHERE id=?').bind(outreach_id).first();
@@ -92,8 +132,9 @@ export async function getOutreach(env, { outreach_id, phone, kind, interaction_i
       ? await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind=? AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone, kind).all()
       : await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind IN ('owner_ai','tenant_ai') AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone).all();
     if (rows.results.length === 1) r = rows.results[0];
-    // Demo fallback for callbacks rerouted to the Talkdesk callback line: if exactly one tenant callback is active, use it.
-    else if (!rows.results.length && kind === 'tenant_ai') {
+    // Demo fallback for callbacks rerouted away from the tenant's own number (the callback agent's phone input is
+    // fixed and it sends no role): if exactly one tenant callback is active, use it.
+    else if (!rows.results.length && (kind === 'tenant_ai' || !kind)) {
       const any = await env.DB.prepare("SELECT * FROM outreach WHERE kind='tenant_ai' AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind().all();
       if (any.results.length === 1) r = any.results[0];
     }

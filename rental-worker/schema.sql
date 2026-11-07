@@ -9,3 +9,6 @@ CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, phone T
 CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, direction TEXT NOT NULL, channel TEXT NOT NULL, addr TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL, provider_id TEXT, ref_type TEXT, ref_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, listing_id TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'shortlisted', terms TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(phone, listing_id));
 CREATE TABLE IF NOT EXISTS outreach (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, to_phone TEXT NOT NULL, tenant_phone TEXT, owner_phone TEXT, visit_id INTEGER, alert_id INTEGER, purpose TEXT, briefing TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'created', interaction_id TEXT, error TEXT, summary TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+
+-- Last AI tool activity per phone line; queued calls wait until the line has been quiet.
+CREATE TABLE IF NOT EXISTS line_activity (phone TEXT PRIMARY KEY, at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
