@@ -1,12 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
-import { reply, fail, normPhone, j } from './util.js';
+import { reply, fail, normPhone, j, parseSpokenTime } from './util.js';
 import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES, briefOf, factsOf, webLeadListing, cacheListings } from './sources.js';
 import { getOutreach, dispatchQueued } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
 import { registerLegacy } from './legacy.js';
-import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits, startOwnerDiscussion, recordOwnerDiscussion } from './flows.js';
+import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply, confirmProposedTime, callOwner, callTenant, updateDeal, STAGES, negotiationBrief, draftAgreement, runAlerts, escalateVisits, startOwnerDiscussion, recordOwnerDiscussion, resolveVisit, tenantVisitReply } from './flows.js';
 
 // Talkdesk orchestrations allow 5 skills and each MCP skill binds ONE tool, so the server exposes a few
 // multi-action tools. Each Talkdesk agent picks the subset it needs:
@@ -15,6 +15,18 @@ import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply,
 //   Tenant callback (outbound): call_context, tenant, listings, visits, research
 const nowIst = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' });
 const opt = z.string().max(100).optional();
+// Talkdesk fills visits.action from a fixed value or an LLM variable; accept loose wording.
+export function visitAction(raw, a = {}) {
+  const s = String(raw || '').toLowerCase();
+  if (['schedule', 'status', 'accept_owner_time', 'propose_time', 'decline', 'demo_owner_reply'].includes(s)) return s;
+  if (/accept|agree|confirm|yes|ok/.test(s)) return 'accept_owner_time';
+  if (/propose|counter|another|different|new time|reschedul|change/.test(s)) return 'propose_time';
+  if (/cancel|decline|reject/.test(s)) return 'decline';
+  if (/status/.test(s)) return 'status';
+  if (/schedul|book|visit|view/.test(s)) return 'schedule';
+  return a.requested_time ? 'schedule' : 'accept_owner_time';
+}
+
 // The callback agent's phone input is fixed for the demo. If that number has no viewing, act for the tenant
 // of the callback that is on the line right now (for example a tenant who called from inside Talkdesk).
 async function dealTenantPhone(env, n) {
@@ -161,13 +173,26 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- visits
-  tool('visits', 'Coordinate a viewing through a separate owner AI call. action: schedule (phone, listing_id, owner_phone, owner_name, requested_time ISO+05:30), status, accept_owner_time, demo_owner_reply (visit_id). Do not promise confirmation until the owner agrees.', {
-    action: z.enum(['schedule', 'status', 'accept_owner_time', 'demo_owner_reply']).optional(),
+  tool('visits', 'Coordinate a viewing through separate owner AI calls. action: schedule (phone, listing_id, requested_time ISO+05:30); accept_owner_time (tenant agrees to the time the owner proposed); propose_time (tenant wants another time: requested_time); decline; status. On a callback the visit is found automatically. Do not promise confirmation until the owner agrees.', {
+    action: z.string().max(40).optional().describe('schedule, accept_owner_time, propose_time, decline or status'),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), owner_phone: z.string().max(20).optional(),
     owner_name: z.string().max(80).optional(), requested_time: z.string().max(40).optional(),
     notes: z.string().max(300).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the request without placing any calls.'),
     visit_id: z.number().int().optional(), text: z.string().max(200).optional(),
-  }, async ({ action, visit_id, text, ...a }) => {
+  }, async ({ action: rawAction, visit_id, text, ...a }) => {
+    let action = visitAction(rawAction, a);
+    // A tenant answering an owner's proposal: route schedule/accept/propose on the open visit to the relay.
+    if (['schedule', 'accept_owner_time', 'propose_time', 'decline'].includes(action)) {
+      const open = await resolveVisit(env, a.phone ? normPhone(a.phone) : null, visit_id);
+      const answering = open && (visit_id || ['owner_proposed_time', 'needs_attention', 'declined'].includes(open.status) || action !== 'schedule') && (!a.listing_id || a.listing_id === open.listing_id);
+      if (answering && open.status !== 'cancelled') {
+        const reply = action === 'decline' ? 'decline' : action === 'propose_time' ? 'propose'
+          : action === 'accept_owner_time' ? 'accept'
+          : (a.requested_time && Math.abs(new Date(parseSpokenTime(a.requested_time, open.requested_time)) - new Date(open.requested_time)) > 5 * 60000 ? 'propose' : 'accept');
+        return tenantVisitReply(env, open, { reply, requested_time: a.requested_time, text: text || a.notes });
+      }
+      if (action !== 'schedule') return { error: 'No viewing is waiting on the tenant. To book a new one use action schedule with listing_id and requested_time.' };
+    }
     if (action === 'schedule') {
       if (!a.phone || !a.listing_id || !a.requested_time) return { error: 'schedule needs phone, listing_id and requested_time' };
       if (!a.owner_phone && a.listing_id.startsWith('MC-SHOWCASE-')) { a.owner_phone = env.DEMO_OWNER_PHONE; a.owner_name ||= 'Rishi D V'; }
@@ -176,7 +201,6 @@ function makeServer(env) {
     }
     if (!visit_id) return { error: 'visit_id required' };
     if (action === 'status') return { visit: await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visit_id).first() };
-    if (action === 'accept_owner_time') return confirmProposedTime(env, visit_id);
     if (action === 'demo_owner_reply') return applyOwnerResponse(env, visit_id, parseReply(text), text);
   });
 
@@ -220,7 +244,7 @@ function makeServer(env) {
   });
 
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
-    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), owner_phone: z.string().max(20).optional(), outcome: z.enum(['yes', 'no', 'reschedule', 'other']).optional(), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
+    visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), owner_phone: z.string().max(20).optional(), outcome: z.string().max(40).optional().describe('yes, no, reschedule (new time in details or proposed_time) or other (counter-offer or conditions)'), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
   }, async ({ visit_id, outreach_id, owner_phone, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only }) => {
     const responseEnv = dry_run_only ? { ...env, TD_FLOW_TENANT_AI: null } : env;
@@ -232,7 +256,8 @@ function makeServer(env) {
       visit_id ||= outreach?.visit_id;
     }
     if (!visit_id) return { error: 'visit_id or valid outreach_id required' };
-    const r = await applyOwnerResponse(responseEnv, visit_id, outcome, details, proposed_time);
+    const confirmation = !!(await env.DB.prepare("SELECT 1 FROM outreach WHERE visit_id=? AND kind='owner_ai' AND purpose LIKE 'Viewing confirmation%' AND status IN ('dialing','in_progress') AND created_at >= datetime('now','-20 minutes') LIMIT 1").bind(visit_id).first());
+    const r = await applyOwnerResponse(responseEnv, visit_id, outcome, details, proposed_time, { confirmation });
     if (!r.error && (quoted_rent || quoted_deposit)) {
       const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first();
       await updateDeal(env, v.phone, v.listing_id, null, { owner_quoted_rent: quoted_rent, owner_quoted_deposit: quoted_deposit });
@@ -249,7 +274,17 @@ export default {
     const url = new URL(request.url);
     if (!env.MCP_BEARER_TOKEN || request.headers.get('Authorization') !== `Bearer ${env.MCP_BEARER_TOKEN}`) return new Response('Unauthorized', { status: 401, headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname !== '/mcp') return new Response('Not found', { status: 404 });
-    return createMcpHandler(() => makeServer(env))(request, env, ctx);
+    // Temporary diagnostics: log which MCP methods Talkdesk sends and how they end.
+    let rpc = null;
+    if (request.method === 'POST') { try { rpc = await request.clone().json(); } catch {} }
+    const res = await createMcpHandler(() => makeServer(env))(request, env, ctx);
+    const one = Array.isArray(rpc) ? rpc[0] : rpc;
+    if (one) {
+      let body = '';
+      if (one.method === 'tools/call' || res.status >= 400) { try { body = (await res.clone().text()).slice(0, 400); } catch {} }
+      console.log(JSON.stringify({ m: one.method, tool: one.params?.name, args: one.params?.arguments, status: res.status, proto: request.headers.get('mcp-protocol-version'), body }));
+    }
+    return res;
   },
   async scheduled(event, env, ctx) {
     // Runs every minute so queued calls start promptly; alerts and escalation keep their 10-minute cadence.

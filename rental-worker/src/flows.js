@@ -1,6 +1,6 @@
 import { placeCall, callStarted } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
-import { j, normPhone } from './util.js';
+import { j, normPhone, parseSpokenTime, normOutcome } from './util.js';
 import { getMemory, recordProperty } from './memory.js';
 
 const fmtTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -46,23 +46,74 @@ export async function scheduleVisit(env, a) {
   };
 }
 
-function ownerBriefing(v, listing, prof) {
+function ownerBriefing(v, listing, prof, followUp = null) {
   const place = listing ? `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.locality || ''}`.trim() : 'rental';
   return {
     role: 'You are calling the PROPERTY OWNER on behalf of a prospective tenant.',
     goal: `Confirm a viewing of the ${place} property on ${fmtTime(v.requested_time)}, or agree an alternative time. Optionally confirm current rent/deposit and availability.`,
+    ...(followUp ? { what_to_say: followUp } : {}),
     tenant: { name: prof?.name || 'the prospective tenant', budget: prof?.max_rent, move_in: prof?.move_in_date },
     listing: listing ? { id: listing.id, title: listing.title, locality: listing.locality, rent: listing.rent, deposit: listing.deposit, url: listing.url } : null,
     visit_id: v.id, requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
     spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing.`,
-    when_done: 'Call owner_response with yes / no / reschedule (with proposed_time) and a one-line summary. Do not transfer or bridge the call.',
+    when_done: 'Call owner_response straight away: yes, no, or reschedule with the owner\'s new time written in details (for example "Owner is free from 3 pm instead"). Never ask the owner to hold: you check with the tenant after this call and call back. Do not transfer or bridge the call.',
   };
 }
 
-export async function callOwner(env, visitId, mode = 'owner_ai') {
+export async function callOwner(env, visitId, mode = 'owner_ai', followUp = null) {
   const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
   const listing = await getListing(env, v.listing_id), prof = await getProfile(env, v.phone);
-  return placeCall(env, { kind: mode, to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing request for listing ${v.listing_id}`, briefing: ownerBriefing(v, listing, prof) });
+  return placeCall(env, { kind: mode, to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing request for listing ${v.listing_id}`, briefing: ownerBriefing(v, listing, prof, followUp) });
+}
+
+// ---- Tenant <-> owner relay for viewings ------------------------------------------
+// Each side is called in turn; the visit row carries the current proposal between calls.
+
+// The callback agent's inputs are partly fixed for the demo, so find the visit being discussed on this call.
+export async function resolveVisit(env, phone, visitId = null) {
+  if (visitId) return env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
+  const active = await env.DB.prepare("SELECT visit_id, tenant_phone FROM outreach WHERE kind='tenant_ai' AND visit_id IS NOT NULL AND status IN ('dialing','in_progress') AND created_at >= datetime('now','-20 minutes') ORDER BY id DESC LIMIT 5").bind().all();
+  const mine = active.results.filter(o => !phone || o.tenant_phone === phone);
+  const pick = mine.length ? mine[0] : active.results.length === 1 ? active.results[0] : null;
+  if (pick) return env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(pick.visit_id).first();
+  if (!phone) return null;
+  return env.DB.prepare("SELECT * FROM visits WHERE phone=? AND status IN ('owner_proposed_time','pending','needs_attention','declined') ORDER BY id DESC LIMIT 1").bind(phone).first();
+}
+
+// reply: accept (the owner's proposed time) | propose (a new time from the tenant) | decline
+export async function tenantVisitReply(env, v, { reply, requested_time, text }) {
+  if (!v) return { error: 'No viewing is being discussed with this tenant.' };
+  const listing = await getListing(env, v.listing_id);
+  const place = listing ? `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || ''}`.trim() : 'the property';
+  const proposed = parseSpokenTime(requested_time || text, v.requested_time);
+  if (reply === 'accept' && proposed && Math.abs(new Date(proposed) - new Date(v.requested_time)) > 5 * 60000) reply = 'propose';
+  if (reply === 'accept') {
+    if (!['owner_proposed_time', 'confirmed'].includes(v.status)) return { error: `There is no time from the owner to accept (visit status: ${v.status}). Ask the tenant for a time and call visits with action propose_time and requested_time.` };
+    await confirmProposedTime(env, v.id);
+    const call = await placeCall(env, { kind: 'owner_ai', to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing confirmation for listing ${v.listing_id}`, briefing: {
+      role: 'You are calling the PROPERTY OWNER back on behalf of the tenant.', task: 'viewing_confirmation', visit_id: v.id,
+      spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, this is the MergeConflicts rental assistant calling back about the viewing of your ${place}.`,
+      what_to_say: `The tenant has agreed to your time: ${fmtTime(v.requested_time)}. The viewing is booked for then.`,
+      requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
+      when_done: 'If the owner acknowledges, call owner_response with outcome yes. If they now cannot make it, record no, or reschedule with their new time in details. Thank them and end the call.',
+    } });
+    return { visit_id: v.id, status: 'confirmed', time: fmtTime(v.requested_time), owner_call: call,
+      say: `Tell the tenant the viewing is booked for ${fmtTime(v.requested_time)} and that you will call the owner shortly after this call to let them know.` };
+  }
+  if (reply === 'propose') {
+    if (!proposed || new Date(proposed) < Date.now()) return { error: 'Ask the tenant for a specific future day and time, then call visits again with action propose_time and requested_time.' };
+    const ownerTime = v.status === 'owner_proposed_time' ? fmtTime(v.requested_time) : null;
+    await env.DB.prepare("UPDATE visits SET status='pending', requested_time=?, notes=COALESCE(notes||char(10),'')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+      .bind(proposed, `Tenant proposed ${proposed}${text ? ': ' + text : ''}`.slice(0, 300), v.id).run();
+    const call = await callOwner(env, v.id, 'owner_ai', `${ownerTime ? `The tenant cannot make ${ownerTime}. ` : ''}The tenant would like to view the ${place} on ${fmtTime(proposed)} instead. Ask whether that works.`);
+    return { visit_id: v.id, status: 'pending', proposed_time: fmtTime(proposed), owner_call: call,
+      say: `Tell the tenant you will call the owner shortly after this call to ask about ${fmtTime(proposed)}, and that they will get a call back with the answer. It is not confirmed yet.` };
+  }
+  if (reply === 'decline') {
+    await env.DB.prepare("UPDATE visits SET status='cancelled', notes=COALESCE(notes||char(10),'')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(`Tenant declined${text ? ': ' + text : ''}`.slice(0, 300), v.id).run();
+    return { visit_id: v.id, status: 'cancelled', say: 'Tell the tenant the viewing request is cancelled and ask if they would like other options.' };
+  }
+  return { error: "Say whether the tenant accepts the owner's time (accept_owner_time), proposes another time (propose_time with requested_time), or wants to cancel." };
 }
 
 // A negotiation or intent is a separate owner conversation, never a call bridge.
@@ -93,7 +144,10 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
   return { status: callStarted(call) ? 'outreach_initiated' : 'outreach_not_started', call };
 }
 
-export async function recordOwnerDiscussion(env, outreach, { outcome, details, quoted_rent, quoted_deposit }) {
+export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome, details, quoted_rent, quoted_deposit }) {
+  let outcome = normOutcome(rawOutcome, details) || 'other';
+  if (outcome === 'reschedule') outcome = 'other';
+  if (outcome === 'no' && (quoted_rent || /counter|instead|would take|can do|lowest|final/i.test(details || ''))) outcome = 'other';
   if (!outreach || !['negotiation', 'signing_intent'].includes(outreach.purpose)) return { error: 'An active negotiation or signing-intent outreach is required.' };
   if (outreach.status === 'completed') return { error: 'This owner response was already recorded; do not send another callback.' };
   const briefing = typeof outreach.briefing === 'string' ? j(outreach.briefing) : (outreach.briefing || {});
@@ -111,7 +165,7 @@ export async function recordOwnerDiscussion(env, outreach, { outcome, details, q
     ? (outcome === 'yes' ? 'The owner accepted the offer. Ask whether the tenant wants to go ahead and rent; if yes, ask their move-in date and call deal with action communicate_intent.'
       : 'Ask whether the tenant accepts the owner\'s counter-offer, wants to make a new offer (ask for the new offer and their maximum), or wants to stop. To accept, call deal with action negotiate_owner, offer "tenant accepts your counter-offer of <amount>" and max_rent equal to that amount; for a new offer, call deal with action negotiate_owner and their new offer and maximum.')
     : (outcome === 'yes' ? 'The owner agreed to proceed. Tell the tenant the owner will share the agreement and next steps; nothing is signed yet.' : 'Explain the owner response and ask what the tenant would like to do next.') } });
-  return { recorded: true, outcome, tenant_call };
+  return { recorded: true, outcome, tenant_call, say: outcome === 'other' ? 'Tell the owner you will take their counter-offer to the tenant and call back with the answer. Do not agree to it and do not ask them to hold. Thank them and end the call.' : 'Thank the owner, say the tenant will be informed, and end the call.' };
 }
 
 // Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.
@@ -137,29 +191,44 @@ export async function callTenant(env, { phone, purpose, details = {}, visit_id =
   });
 }
 
-export async function applyOwnerResponse(env, visitId, outcome, text, proposed_time = null, { notifyTenant = true } = {}) {
+export async function applyOwnerResponse(env, visitId, rawOutcome, text, rawTime = null, { notifyTenant = true, confirmation = false } = {}) {
   const v = await env.DB.prepare('SELECT * FROM visits WHERE id=?').bind(visitId).first();
   if (!v) return { error: 'visit not found' };
-  if (outcome === 'reschedule' && (!proposed_time || isNaN(new Date(proposed_time)))) {
-    return { error: 'A valid proposed_time is required for a reschedule; do not present the original time as the owner\'s proposal.' };
+  let outcome = normOutcome(rawOutcome, text) || 'other';
+  // Owners usually state the new time in words; the Talkdesk agent passes it in details.
+  const spoken = parseSpokenTime(rawTime, v.requested_time) || parseSpokenTime(text, v.requested_time);
+  const moved = !!spoken && Math.abs(new Date(spoken) - new Date(v.requested_time)) > 5 * 60000;
+  if (moved && outcome !== 'yes') outcome = 'reschedule';
+  if (outcome === 'reschedule' && !moved) {
+    return { error: 'Ask the owner which day and time works instead, then call owner_response again with that time in details. Do not ask the owner to hold.' };
+  }
+  const proposed_time = outcome === 'reschedule' ? spoken : null;
+  // The owner acknowledging a time the tenant already accepted needs no further call to the tenant.
+  if (confirmation && outcome === 'yes') {
+    await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind='owner_ai' AND purpose LIKE 'Viewing confirmation%' AND status IN ('initiating','dialing','dry_run','in_progress')").bind(`Owner acknowledged: ${text || 'yes'}`.slice(0, 500), visitId).run();
+    await env.DB.prepare("UPDATE visits SET status='confirmed', updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(visitId).run();
+    return { visit_id: visitId, status: 'confirmed', say: 'Thank the owner; the viewing stands. No further calls are needed.' };
   }
   const status = { yes: 'confirmed', no: 'declined', reschedule: 'owner_proposed_time', other: 'needs_attention' }[outcome] || outcome;
   let newTime = null;
   if (proposed_time && !isNaN(new Date(proposed_time))) newTime = new Date(proposed_time).toISOString();
   await env.DB.prepare('UPDATE visits SET status=?, requested_time=COALESCE(?,requested_time), notes=COALESCE(notes||char(10),\'\')||?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .bind(status, status === 'owner_proposed_time' ? newTime : null, 'Owner: ' + (text || outcome) + (newTime ? ` (proposed ${newTime})` : ''), visitId).run();
-  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind='owner_ai' AND purpose LIKE 'Viewing request for listing %' AND status IN ('initiating','dialing','dry_run','in_progress')").bind(`Owner said ${outcome}: ${text || ''}`.slice(0, 500), visitId).run();
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE visit_id=? AND kind='owner_ai' AND (purpose LIKE 'Viewing request for listing %' OR purpose LIKE 'Viewing confirmation%') AND status IN ('initiating','dialing','dry_run','in_progress')").bind(`Owner said ${outcome}: ${text || ''}`.slice(0, 500), visitId).run();
   const listing = await getListing(env, v.listing_id);
   const place = listing ? `${listing.bhk} BHK in ${listing.locality}` : v.listing_id;
   const when = fmtTime(newTime || v.requested_time);
   const update = status === 'confirmed' ? `The owner confirmed the visit to the ${place} on ${when}.`
     : status === 'declined' ? `The owner cannot do ${fmtTime(v.requested_time)} for the ${place}.`
-    : status === 'owner_proposed_time' ? `The owner proposed ${when} instead for the ${place}; ask the tenant if that works.`
+    : status === 'owner_proposed_time' ? `The owner cannot do ${fmtTime(v.requested_time)} for the ${place} but is free on ${when} instead; ask the tenant if that works.`
     : `The owner said something about the ${place} that needs the tenant's input: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
   if (status === 'confirmed') await recordProperty(env, v.phone, v.listing_id, 'visit_confirmed', text, null, `visit-confirmed:${visitId}`);
-  const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Offer a property dossier / negotiation tips before the visit.' : 'Ask for a new time (or accept the proposed one): visits action=schedule or accept_owner_time.' } }) : null;
-  return { visit_id: visitId, status, update, tenant_call };
+  const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Confirm the time and answer questions. Nothing else to arrange.'
+    : status === 'owner_proposed_time' ? `Ask whether ${when} works. If yes, call visits with action accept_owner_time. If they want a different time, ask for it and call visits with action propose_time and requested_time. The owner is called back automatically after this call.`
+    : 'Ask whether the tenant wants to propose another time (visits action propose_time with requested_time) or look at other options.' } }) : null;
+  return { visit_id: visitId, status, update, tenant_call,
+    say: status === 'owner_proposed_time' ? `Tell the owner you will check ${when} with the tenant and call back shortly. Then thank them and end the call; do not ask them to hold.` : 'Thank the owner, say the tenant will be informed, and end the call.' };
 }
 
 export function parseReply(body) {
