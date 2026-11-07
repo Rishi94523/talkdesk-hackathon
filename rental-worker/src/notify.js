@@ -92,6 +92,11 @@ export async function getOutreach(env, { outreach_id, phone, kind, interaction_i
       ? await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind=? AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone, kind).all()
       : await env.DB.prepare("SELECT * FROM outreach WHERE to_phone=? AND kind IN ('owner_ai','tenant_ai') AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind(phone).all();
     if (rows.results.length === 1) r = rows.results[0];
+    // Demo fallback for callbacks rerouted to the Talkdesk callback line: if exactly one tenant callback is active, use it.
+    else if (!rows.results.length && kind === 'tenant_ai') {
+      const any = await env.DB.prepare("SELECT * FROM outreach WHERE kind='tenant_ai' AND status IN ('initiating','dialing','in_progress') AND created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 2").bind().all();
+      if (any.results.length === 1) r = any.results[0];
+    }
   }
   return r ? { ...r, briefing: j(r.briefing) } : null;
 }

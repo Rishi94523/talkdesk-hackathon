@@ -115,11 +115,18 @@ export async function recordOwnerDiscussion(env, outreach, { outcome, details, q
 }
 
 // Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.
+// A tenant who called from inside Talkdesk shows the team line as Caller ID; calling that back would land
+// in our own concierge, so those callbacks ring the Talkdesk callback line (answered in the agent app) instead.
+export function callbackDestination(env, phone) {
+  const internal = String(env.TALKDESK_ORIGIN_NUMBERS || '').split(',').map(x => x.trim()).filter(Boolean);
+  return env.CALLBACK_RING_NUMBER && internal.includes(phone) ? env.CALLBACK_RING_NUMBER : phone;
+}
+
 export async function callTenant(env, { phone, purpose, details = {}, visit_id = null, alert_id = null }) {
   const prof = await getProfile(env, phone);
   const memory = await getMemory(env, phone);
   return placeCall(env, {
-    kind: 'tenant_ai', to: phone, tenant_phone: phone, visit_id, alert_id, purpose,
+    kind: 'tenant_ai', to: callbackDestination(env, phone), tenant_phone: phone, visit_id, alert_id, purpose,
     briefing: {
       role: 'You are calling the TENANT (your client) back. This is a two-way conversation, not an announcement.',
       purpose, ...details, tenant_profile: prof, memory,

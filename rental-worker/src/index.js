@@ -15,6 +15,14 @@ import { getProfile, saveProfile, scheduleVisit, applyOwnerResponse, parseReply,
 //   Tenant callback (outbound): call_context, tenant, listings, visits, research
 const nowIst = () => new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'full', timeStyle: 'short' });
 const opt = z.string().max(100).optional();
+// The callback agent's phone input is fixed for the demo. If that number has no viewing, act for the tenant
+// of the callback that is on the line right now (for example a tenant who called from inside Talkdesk).
+async function dealTenantPhone(env, n) {
+  if (await env.DB.prepare("SELECT 1 FROM visits WHERE phone=? AND status NOT IN ('cancelled') LIMIT 1").bind(n).first()) return n;
+  const o = await env.DB.prepare("SELECT tenant_phone FROM outreach WHERE kind='tenant_ai' AND status IN ('dialing','in_progress') AND created_at >= datetime('now','-20 minutes') ORDER BY id DESC LIMIT 2").bind().all();
+  return o.results.length === 1 && o.results[0].tenant_phone ? o.results[0].tenant_phone : n;
+}
+
 // Talkdesk fills the action from an LLM-extracted variable, so accept loose wording and infer from the inputs.
 export function dealAction(raw, t = {}) {
   const a = String(raw || '').toLowerCase();
@@ -183,10 +191,11 @@ function makeServer(env) {
     notice_months: z.number().int().min(0).optional(), escalation_pct: z.number().min(0).max(20).optional(), extra_terms: z.array(z.string().max(200)).max(8).optional(),
     purpose: z.string().max(400).optional(), offer: z.string().max(400).optional(), max_rent: z.number().int().positive().optional(), max_deposit: z.number().int().positive().optional(), move_in_date: z.string().max(40).optional(), notes: z.string().max(400).optional(),
   }, async ({ action: rawAction, phone: p, listing_id, stage, terms, purpose, ...t }) => {
-    const n = normPhone(p);
+    let n = normPhone(p);
     const action = dealAction(rawAction, t);
     if (!action) return { error: 'Say whether this is an offer (negotiate_owner) or the tenant going ahead (communicate_intent).' };
     if (action === 'call_tenant_later') return callTenant(env, { phone: n, purpose: purpose || 'Follow-up' });
+    if (action === 'negotiate_owner' || action === 'communicate_intent') n = await dealTenantPhone(env, n);
     if (!listing_id && (action === 'negotiate_owner' || action === 'communicate_intent')) listing_id = (await env.DB.prepare("SELECT listing_id FROM visits WHERE phone=? AND status NOT IN ('cancelled') ORDER BY id DESC LIMIT 1").bind(n).first())?.listing_id;
     if (!listing_id) return { error: 'listing_id required' };
     if (action === 'negotiate_owner' || action === 'communicate_intent') return startOwnerDiscussion(env, { phone: n, listing_id, purpose: action === 'negotiate_owner' ? 'negotiation' : 'signing_intent', offer: t.offer, max_rent: t.max_rent, max_deposit: t.max_deposit, move_in_date: t.move_in_date, notes: t.notes });
