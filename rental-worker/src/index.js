@@ -206,8 +206,8 @@ function makeServer(env) {
   });
 
   // ---------------------------------------------------------------- deal
-  tool('deal', 'Deal tracking. Actions: update; negotiate_owner (phone, listing_id, offer and explicit max_rent and/or max_deposit); communicate_intent (phone, listing_id, move_in_date); draft_agreement; call_tenant_later. Owner outreach is a separate two-way AI call; never promise the call or agreement succeeded unless its result confirms it.', {
-    action: z.string().max(40).optional().describe('negotiate_owner (send an offer or accept a counter-offer) or communicate_intent (tenant wants to go ahead and rent); also update, draft_agreement, call_tenant_later'),
+  tool('deal', 'Deal tracking. Actions: update; negotiate_owner (phone, listing_id, offer = the tenant goal such as "goal rent 35000 with 2 months deposit", max_rent = their private maximum; the owner agent then negotiates on their behalf and the tenant is called back with the final result); communicate_intent (phone, listing_id, move_in_date); draft_agreement; call_tenant_later. Owner outreach is a separate two-way AI call; never promise the call or agreement succeeded unless its result confirms it.', {
+    action: z.string().max(40).optional().describe('negotiate_owner (negotiate for the tenant from their goal up to their maximum) or communicate_intent (tenant wants to go ahead and rent); also update, draft_agreement, call_tenant_later'),
     phone: z.string().max(20).optional(), listing_id: z.string().max(60).optional(), stage: z.enum(STAGES).optional(),
     terms: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
     landlord_name: z.string().max(100).optional(), tenant_name: z.string().max(100).optional(), property_address: z.string().max(300).optional(),

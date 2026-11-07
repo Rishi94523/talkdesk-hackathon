@@ -3,6 +3,7 @@
 // Each call is recorded as an "outreach" row whose id is passed to the flow, so the AI agent
 // on the call can load its briefing with the get_outreach_context tool.
 import { tmo, j } from './util.js';
+import { enrichNegotiation } from './negotiation.js';
 
 let cached = { token: null, exp: 0 };
 async function talkdeskToken(env) {
@@ -45,7 +46,7 @@ export async function placeCall(env, { kind, to, tenant_phone = null, owner_phon
   const id = ins.meta.last_row_id;
   if (defer) return { outreach_id: id, kind, to, status: 'queued', note: `The call will be placed about ${callDelaySeconds(env)}-${callDelaySeconds(env) + 60} seconds after this request, once the current call has ended.` };
   let status = 'dry_run', interaction_id = null, error = null;
-  if (ready) await closeEarlierCalls(env, to, id);
+  if (ready) { await closeEarlierCalls(env, to, id); const o = { id, kind, briefing: JSON.stringify(briefing) }; await researchBeforeDial(env, o); briefing = j(o.briefing); }
   if (ready) {
     try {
       const res = await startFlow(env, flowId, { to_number: to, tenant_number: tenant_phone, owner_number: owner_phone, outreach_id: id, intro: briefing.spoken_intro || purpose });
@@ -77,6 +78,7 @@ export async function dispatchQueued(env) {
     const claim = await env.DB.prepare("UPDATE outreach SET status='initiating' WHERE id=? AND status='queued'").bind(o.id).run();
     if (!claim.meta.changes) continue;
     await closeEarlierCalls(env, o.to_phone, o.id);
+    await researchBeforeDial(env, o);
     const flowId = env[FLOW_ENV[o.kind]];
     let status = 'failed', interaction_id = null, error = null;
     if (!flowId || !env.TALKDESK_CLIENT_ID) error = `Flow for ${o.kind} is no longer configured.`;
@@ -91,6 +93,17 @@ export async function dispatchQueued(env) {
     out.push({ outreach_id: o.id, kind: o.kind, status, ...(error ? { error } : {}) });
   }
   return out;
+}
+
+// A negotiation call is researched (comparables, market, web) right before the owner is dialled.
+async function researchBeforeDial(env, o) {
+  const b = j(o.briefing);
+  if (o.kind !== 'owner_ai' || b.task !== 'negotiation' || b.research_done) return;
+  try {
+    const enriched = await enrichNegotiation(env, b);
+    o.briefing = JSON.stringify(enriched);
+    await env.DB.prepare('UPDATE outreach SET briefing=? WHERE id=?').bind(o.briefing, o.id).run();
+  } catch (e) { console.log('negotiation research failed', e.message); }
 }
 
 // A phone is on one call at a time: starting a call to a number ends any earlier open call to it, so the

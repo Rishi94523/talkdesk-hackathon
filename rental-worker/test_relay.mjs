@@ -78,19 +78,40 @@ assert.equal(r5.status, 'confirmed');
 assert.equal(outreach().length, before);
 assert.equal(last().status, 'completed');
 
-// 7. Negotiation: owner counters with a rent (outcome "no") -> treated as counter, tenant called; tenant accepts -> owner called.
-const n1 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'rent 40000', max_rent: 43000 });
+// 7. Negotiation on the tenant's behalf: goal 40000, max 43000, asking 45000. The owner call carries a concession
+// ladder, the agent agrees within it, and the tenant gets one call with the final result.
+const n1 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40k with 2 months deposit', max_rent: 43000 });
 assert.equal(n1.call.kind, 'owner_ai');
+assert.match(n1.say, /negotiate/);
+const b1 = JSON.parse(last().briefing);
+assert.deepEqual(b1.negotiation_plan.offers_in_order, [40000, 41000, 42500, 43000]);
+assert.equal(b1.negotiation_plan.deposit_goal, '2 months');
+assert.match(b1.what_to_say, /Open by offering ₹40,000/);
+assert.ok(!b1.what_to_say.includes('43,000'), 'opening line never names the maximum');
 db.prepare("UPDATE outreach SET status='in_progress' WHERE id=?").run(n1.call.outreach_id);
 const o1 = db.prepare('SELECT * FROM outreach WHERE id=?').get(n1.call.outreach_id);
-const c1 = await recordOwnerDiscussion(env, o1, { outcome: 'no', details: 'Owner would take 43000, not lower', quoted_rent: 43000 });
-assert.equal(c1.outcome, 'other');
-assert.match(c1.say, /take their counter-offer to the tenant/);
+const c1 = await recordOwnerDiscussion(env, o1, { outcome: 'yes', details: 'Owner agreed to 41,500 a month, down from 45000, with 2 months deposit' });
+assert.equal(c1.result, 'agreed');
+assert.match(c1.say, /agreed at ₹41,500/);
 assert.equal(last().kind, 'tenant_ai');
-const n2 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'tenant accepts your counter-offer of 43000', max_rent: 43000 });
-assert.equal(n2.call.kind, 'owner_ai');
-const o2 = db.prepare('SELECT * FROM outreach WHERE id=?').get(n2.call.outreach_id);
-const c2 = await recordOwnerDiscussion(env, o2, { outcome: 'Yes, agreed', details: 'Owner agrees to 43000' });
-assert.equal(c2.outcome, 'yes');
+assert.match(last().purpose, /agreed to a rent of ₹41,500 .*₹3,500 a month below/);
 assert.match(JSON.parse(last().briefing).next, /go ahead and rent/);
-console.log('PASS viewing and negotiation relay alternates owner and tenant calls until agreed');
+const deal = JSON.parse(db.prepare('SELECT terms FROM deals WHERE phone=? AND listing_id=?').get(T, L).terms);
+assert.equal(deal.agreed_rent, 41500);
+
+// 8. Owner will not come down to the maximum -> tenant told the lowest rent; accepting it starts a single-step negotiation.
+const n2 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40000', max_rent: 43000 });
+const o2 = db.prepare('SELECT * FROM outreach WHERE id=?').get(n2.call.outreach_id);
+const c2 = await recordOwnerDiscussion(env, o2, { outcome: 'no', details: 'Owner will not go below 44000', quoted_rent: 44000 });
+assert.equal(c2.result, 'above_limit');
+assert.match(c2.say, /Do not agree/);
+assert.match(last().purpose, /lowest rent is ₹44,000/);
+assert.match(JSON.parse(last().briefing).next, /goal rent 44000" and max_rent 44000/);
+// An agent that "agrees" above the maximum is never recorded as a deal.
+const n3 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40000', max_rent: 43000 });
+const c3 = await recordOwnerDiscussion(env, db.prepare('SELECT * FROM outreach WHERE id=?').get(n3.call.outreach_id), { outcome: 'yes', details: 'Agreed at 44500', quoted_rent: 44500 });
+assert.equal(c3.result, 'above_limit');
+const n4 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 44000', max_rent: 44000 });
+assert.deepEqual(JSON.parse(db.prepare('SELECT briefing FROM outreach WHERE id=?').get(n4.call.outreach_id).briefing).negotiation_plan.offers_in_order, [44000]);
+assert.match((await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 45000', max_rent: 43000 })).error, /above the maximum/);
+console.log('PASS viewing relay alternates owner and tenant; negotiation runs on the tenant\'s behalf with one result call');

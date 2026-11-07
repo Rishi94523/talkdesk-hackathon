@@ -10,8 +10,22 @@ export const DEMO = [
   { id: 'MC-006', locality: 'Bellandur', bhk: 2, rent: 39000, deposit: 200000, furnishing: 'none', parking: 'car', features: 'Lift; parking', lift: true },
 ].map(x => ({ ...x, source: 'demo', url: null, verified: false, note: 'Fictional demo listing; not real or bookable.' }));
 
+// The showcase is priced against the real listings of the same search: above the local median (at least the
+// 75th percentile and 15% over the median) but inside the caller's budget, so it is never the cheapest option
+// and the negotiating agent has real, cheaper comparables to argue with.
+export function showcasePrice(c = {}, peers = []) {
+  const rents = peers.filter(l => l.rent && !l.is_showcase && (!c.bhk || l.bhk === c.bhk)).map(l => l.rent);
+  const r = n => Math.round(n / 500) * 500;
+  const med = rents.length >= 3 ? median(rents) : null;
+  let rent = med ? r(Math.max(pct(rents, 0.75), med * 1.15)) : null;
+  if (c.max_rent) rent = Math.min(rent ?? Infinity, r(c.max_rent * 0.97));
+  rent = rent && Number.isFinite(rent) ? rent : 45000;
+  const deposit = Math.min(rent * 5, c.max_deposit || Infinity);
+  return { rent, deposit, market: med ? { median_rent: med, p25_rent: pct(rents, 0.25), p75_rent: pct(rents, 0.75), sample: rents.length } : null };
+}
+
 // The showcase is synthetic, not a real Prestige property. Keep its contact in a Worker secret.
-export function showcaseListing(criteria = {}) {
+export function showcaseListing(criteria = {}, price = null) {
   const c = typeof criteria === 'string' ? { locality: criteria } : criteria;
   const area = (c.locality || 'Bengaluru').trim().slice(0, 60);
   const slug = area.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'bengaluru';
@@ -20,7 +34,7 @@ export function showcaseListing(criteria = {}) {
   let hash = 2166136261;
   for (const ch of JSON.stringify(selected)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
   const amenities = [...new Set(['Balcony', 'lift', 'gym', 'swimming pool', 'covered parking', ...selected.amenities])];
-  return { id: `MC-SHOWCASE-${slug}-${(hash >>> 0).toString(36)}`, source: 'demo', is_showcase: true, title: 'MergeConflicts Garden Residences', locality: area, bhk: selected.bhk, rent: Math.min(45000, selected.max_rent || 45000), deposit: Math.min(180000, selected.max_deposit || 180000), furnishing: selected.furnishing || 'semi', property_type: selected.property_type || 'apartment', available_from: selected.move_in_date, pets_allowed: selected.pets, size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, amenities, features: amenities.join(', '), demo_requested_preferences: selected.requested_preferences, owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property. Its details are generated from the search preferences and do not describe a real property.',
+  return { id: `MC-SHOWCASE-${slug}-${(hash >>> 0).toString(36)}`, source: 'demo', is_showcase: true, title: 'MergeConflicts Garden Residences', locality: area, bhk: selected.bhk, rent: price?.rent ?? Math.min(45000, selected.max_rent || 45000), deposit: price?.deposit ?? Math.min(180000, selected.max_deposit || 180000), ...(price?.market ? { market_comparison: price.market } : {}), furnishing: selected.furnishing || 'semi', property_type: selected.property_type || 'apartment', available_from: selected.move_in_date, pets_allowed: selected.pets, size_sqft: 1150, floor: 4, parking: 'car', lift: true, gym: true, swimming_pool: true, amenities, features: amenities.join(', '), demo_requested_preferences: selected.requested_preferences, owner_name: 'Rishi D V', owner_contact_available: true, url: null, note: 'Fictional demo property. Its details are generated from the search preferences and do not describe a real property.',
     details: {
       address: `Tower B, MergeConflicts Garden Residences, off the main road in ${area}, Bengaluru (fictional)`,
       owner: 'Rishi D V, the owner, manages the flat directly (no broker, no brokerage fee).',
@@ -117,7 +131,7 @@ export async function findListings(env, c, { includeDemo = false, includeShowcas
   const nb = await searchNoBroker(env, c);
   let list = nb.results;
   if (includeDemo) list = list.concat(DEMO.filter(d => !c.locality || d.locality.toLowerCase().includes(c.locality.toLowerCase())));
-  if (includeShowcase) list = list.concat([showcaseListing(c)]);
+  if (includeShowcase) list = list.concat([showcaseListing(c, showcasePrice(c, nb.results.filter(plausibleListing)))]);
   await cacheListings(env, list);
   const want = c.locality?.toLowerCase();
   const ranked = list

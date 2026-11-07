@@ -1,6 +1,6 @@
 import { placeCall, callStarted, noteOnCall } from './notify.js';
 import { findListings, getListing, marketStats } from './sources.js';
-import { j, normPhone, parseSpokenTime, normOutcome } from './util.js';
+import { j, normPhone, parseSpokenTime, normOutcome, parseAmounts, parseRentGoal, rentLadder } from './util.js';
 import { getMemory, recordProperty } from './memory.js';
 
 const fmtTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -120,56 +120,106 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
 }
 
 // A negotiation or intent is a separate owner conversation, never a call bridge.
+// Negotiation is carried out by the owner agent on the tenant's behalf: the tenant sets a goal and a private
+// maximum, the agent opens at the goal and concedes step by step, and the tenant is called only with the result.
 export async function startOwnerDiscussion(env, { phone, listing_id, purpose, offer, max_rent, max_deposit, move_in_date, notes }) {
   const tenantPhone = normPhone(phone);
   const listing = await getListing(env, listing_id);
   if (!listing) return { error: 'Unknown listing_id; select a property first.' };
   const visit = await env.DB.prepare('SELECT * FROM visits WHERE phone=? AND listing_id=? ORDER BY id DESC LIMIT 1').bind(tenantPhone, listing_id).first();
   if (!visit?.owner_phone) return { error: 'No owner contact is available for this property.' };
-  if (purpose === 'negotiation' && (!offer || (!max_rent && !max_deposit))) return { error: 'Negotiation requires the tenant’s offer and at least one explicit rent or deposit limit.' };
+  const goal = parseRentGoal(offer);
+  if (purpose === 'negotiation' && (!max_rent || !goal.rent)) return { error: 'Negotiation needs explicit amounts: the tenant’s ideal (goal) rent in offer, for example "goal rent 35000 with 2 months deposit", and their maximum rent in max_rent.' };
+  if (purpose === 'negotiation' && goal.rent > max_rent) return { error: `The goal rent ${inr(goal.rent)} is above the maximum ${inr(max_rent)}; confirm both amounts with the tenant.` };
   if (purpose === 'signing_intent' && !move_in_date) return { error: 'Ask the tenant for their preferred move-in date before informing the owner.' };
-  await updateDeal(env, tenantPhone, listing_id, purpose === 'negotiation' ? 'negotiating' : null, { ...(offer ? { tenant_offer: offer } : {}), ...(max_rent ? { authorized_max_rent: max_rent } : {}), ...(max_deposit ? { authorized_max_deposit: max_deposit } : {}), ...(move_in_date ? { proposed_move_in_date: move_in_date } : {}), ...(notes ? { tenant_instructions: notes } : {}) });
   const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || 'property'} in ${listing.locality || 'Bengaluru'}`;
-  await noteOnCall(env, { tenant_phone: tenantPhone, kind: 'tenant_ai', text: purpose === 'negotiation' ? `Tenant's answer: ${offer}.` : `Tenant wants to go ahead and rent, moving in around ${move_in_date}.` });
-  const ask = purpose === 'negotiation'
-    ? `The tenant${visit.status === 'confirmed' ? ', who has a viewing arranged,' : ''} would like to discuss the terms: they offer ${offer}.`
-    : `The tenant would like to go ahead and rent it, moving in around ${move_in_date}.`;
-  const call = await placeCall(env, { kind: 'owner_ai', to: visit.owner_phone, tenant_phone: tenantPhone, owner_phone: visit.owner_phone, visit_id: visit.id, purpose, briefing: {
-    role: 'You are an AI assistant calling the property owner on behalf of a prospective tenant.',
-    spoken_intro: `Hello${visit.owner_name ? ' ' + visit.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of the prospective tenant about your ${place}.`,
-    what_to_say: ask,
-    ...(purpose === 'negotiation' ? { private_limit_never_say: { max_rent: max_rent || null, max_deposit: max_deposit || null } } : {}),
-    listed_terms: { rent: listing.rent ?? null, deposit: listing.deposit ?? null },
-    task: purpose, listing: { id: listing.id, title: listing.title, locality: listing.locality }, visit_id: visit.id,
-    tenant_offer: offer || null, authorized_max_rent: max_rent || null, authorized_max_deposit: max_deposit || null,
-    proposed_move_in_date: move_in_date || null, tenant_instructions: notes || null,
-    instruction: 'Discuss only the authorized terms; record the owner response. Do not claim acceptance without explicit agreement or transfer the call to the tenant.',
-  } });
-  return { status: callStarted(call) ? 'outreach_initiated' : 'outreach_not_started', call };
+  const intro = { role: 'You are an AI assistant calling the property owner on behalf of a prospective tenant.',
+    spoken_intro: `Hello${visit.owner_name ? ' ' + visit.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of the prospective tenant about your ${place}.` };
+  const common = { listed_terms: { rent: listing.rent ?? null, deposit: listing.deposit ?? null, maintenance: listing.maintenance ?? null }, listing: { id: listing.id, title: listing.title, locality: listing.locality }, visit_id: visit.id };
+  let briefing;
+  if (purpose === 'negotiation') {
+    const ladder = rentLadder(goal.rent, max_rent, listing.rent);
+    const deposit = goal.deposit_months ? `${goal.deposit_months} months` : goal.deposit ? inr(goal.deposit) : null;
+    const levers = [visit.status === 'confirmed' ? 'The tenant has a viewing arranged and is ready to decide quickly.' : 'The tenant is ready to decide quickly.',
+      'The tenant can commit to an 11-month agreement with rent paid on time.'];
+    await updateDeal(env, tenantPhone, listing_id, 'negotiating', { tenant_goal: offer, goal_rent: goal.rent, authorized_max_rent: max_rent, ...(max_deposit ? { authorized_max_deposit: max_deposit } : {}), ...(notes ? { tenant_instructions: notes } : {}) });
+    await noteOnCall(env, { tenant_phone: tenantPhone, kind: 'tenant_ai', text: `Tenant asked the assistant to negotiate: goal ${inr(goal.rent)} a month, private maximum set.` });
+    briefing = { ...intro, ...common, task: 'negotiation',
+      what_to_say: `The tenant${visit.status === 'confirmed' ? ', who has a viewing arranged,' : ''} would like to rent your ${place} and has asked me to agree the terms. Open by offering ${inr(ladder[0])} a month${deposit ? ` with a ${deposit} deposit` : ''}.`,
+      negotiation_plan: {
+        offers_in_order: ladder, deposit_goal: deposit, max_deposit: max_deposit || null,
+        how: `You negotiate for the tenant and may agree on their behalf. Offer ${inr(ladder[0])} first. If the owner refuses, give one reason from levers and ask what rent they would accept. If their figure is at or below an offer in offers_in_order, agree to their figure. Otherwise move to the next offer, one step at a time, never skipping steps and never above the last one. If the owner will not go to ${inr(ladder[ladder.length - 1])} or lower, stop and ask for their lowest rent. Aim for the lowest rent you can get.`,
+      },
+      levers, private_limit_never_say: { max_rent, max_deposit: max_deposit || null },
+      instruction: 'Never mention the tenant\'s maximum or that there is one. Never offer more than the last amount in offers_in_order. Record the result once, at the end, with owner_response.' };
+  } else {
+    await updateDeal(env, tenantPhone, listing_id, null, { proposed_move_in_date: move_in_date, ...(notes ? { tenant_instructions: notes } : {}) });
+    await noteOnCall(env, { tenant_phone: tenantPhone, kind: 'tenant_ai', text: `Tenant wants to go ahead and rent, moving in around ${move_in_date}.` });
+    briefing = { ...intro, ...common, task: purpose, what_to_say: `The tenant would like to go ahead and rent it, moving in around ${move_in_date}.`, proposed_move_in_date: move_in_date, tenant_instructions: notes || null,
+      instruction: 'Ask whether the owner agrees and what the next steps are; record the owner response.' };
+  }
+  const call = await placeCall(env, { kind: 'owner_ai', to: visit.owner_phone, tenant_phone: tenantPhone, owner_phone: visit.owner_phone, visit_id: visit.id, purpose, briefing });
+  return { status: callStarted(call) ? 'outreach_initiated' : 'outreach_not_started', call,
+    ...(purpose === 'negotiation' ? { say: `Tell the tenant you will research comparable flats and local rents, then call the owner shortly after this call ends and negotiate for them, starting from their goal and never going above their maximum, which stays private.${listing.market_comparison?.median_rent ? ` Mention that similar flats in ${listing.locality} have a median asking rent of ${inr(listing.market_comparison.median_rent)}.` : ''} They will get a call back with the final result, so they should keep their line free.` } : {}) };
 }
 
 export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome, details, quoted_rent, quoted_deposit }) {
-  let outcome = normOutcome(rawOutcome, details) || 'other';
-  if (outcome === 'reschedule') outcome = 'other';
-  if (outcome === 'no' && (quoted_rent || /counter|instead|would take|can do|lowest|final/i.test(details || ''))) outcome = 'other';
   if (!outreach || !['negotiation', 'signing_intent'].includes(outreach.purpose)) return { error: 'An active negotiation or signing-intent outreach is required.' };
   if (outreach.status === 'completed') return { error: 'This owner response was already recorded; do not send another callback.' };
   const briefing = typeof outreach.briefing === 'string' ? j(outreach.briefing) : (outreach.briefing || {});
   const listingId = briefing.listing?.id;
   if (!listingId || !outreach.tenant_phone) return { error: 'Outreach is missing its tenant or property.' };
+  let outcome = normOutcome(rawOutcome, details) || 'other';
+  if (outcome === 'reschedule') outcome = 'other';
   const note = (details || outcome).slice(0, 400);
-  const nego = outreach.purpose === 'negotiation';
-  const stage = nego ? (outcome === 'yes' ? 'offer_made' : 'negotiating') : null;
-  await updateDeal(env, outreach.tenant_phone, listingId, stage, { owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}),
-    ...(nego && outcome === 'yes' ? { owner_accepted_offer: briefing.tenant_offer || note } : {}), ...(!nego && outcome === 'yes' ? { owner_agreed_to_proceed: true } : {}) });
-  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(`Owner response (${outcome}): ${note}`.slice(0, 500), outreach.id).run();
-  const what = outreach.purpose === 'negotiation' ? `your offer${briefing.tenant_offer ? ' of ' + briefing.tenant_offer : ''}` : 'your intention to rent';
-  const said = { yes: 'accepted', no: 'did not accept', other: 'replied' }[outcome] || outcome;
-  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: `${outreach.purpose === 'negotiation' ? 'Negotiation' : 'Rental intent'} update: the owner ${said} ${what} for ${briefing.listing?.title || 'the property'}${details && details !== outcome ? ': ' + details.slice(0, 200) : ''}. Tell the tenant exactly this, discuss their next step, and do not claim an agreement beyond what the owner said.`, visit_id: outreach.visit_id, details: { listing_id: listingId, owner_outcome: outcome, owner_details: note, quoted_rent, quoted_deposit, next: nego
-    ? (outcome === 'yes' ? 'The owner accepted the offer. Ask whether the tenant wants to go ahead and rent; if yes, ask their move-in date and call deal with action communicate_intent.'
-      : 'Ask whether the tenant accepts the owner\'s counter-offer, wants to make a new offer (ask for the new offer and their maximum), or wants to stop. To accept, call deal with action negotiate_owner, offer "tenant accepts your counter-offer of <amount>" and max_rent equal to that amount; for a new offer, call deal with action negotiate_owner and their new offer and maximum.')
-    : (outcome === 'yes' ? 'The owner agreed to proceed. Tell the tenant the owner will share the agreement and next steps; nothing is signed yet.' : 'Explain the owner response and ask what the tenant would like to do next.') } });
-  return { recorded: true, outcome, tenant_call, say: outcome === 'other' ? 'Tell the owner you will take their counter-offer to the tenant and call back with the answer. Do not agree to it and do not ask them to hold. Thank them and end the call.' : 'Thank the owner, say the tenant will be informed, and end the call.' };
+  const title = briefing.listing?.title || 'the property';
+  let result, tenantPurpose, next, say, stage = null, terms = {};
+  if (outreach.purpose === 'negotiation') {
+    const plan = briefing.negotiation_plan || {};
+    const max = briefing.private_limit_never_say?.max_rent ?? briefing.authorized_max_rent ?? null;
+    const amounts = parseAmounts(details);
+    const rent = quoted_rent ?? (amounts.length ? Math.min(...amounts) : null);
+    const listed = briefing.listed_terms?.rent;
+    if (outcome !== 'no' && rent && max && rent <= max) result = 'agreed';
+    else if (outcome === 'yes' && !rent) result = 'agreed';
+    else if (rent && max && rent > max) result = 'above_limit';
+    else result = outcome === 'no' ? 'refused' : 'other';
+    if (result === 'agreed') {
+      const at = rent ? inr(rent) : `the last offer${plan.offers_in_order ? ' of ' + inr(plan.offers_in_order.at(-1)) : ''}`;
+      const saved = rent && listed && listed > rent ? ` That is ${inr(listed - rent)} a month below the asking rent of ${inr(listed)}.` : '';
+      stage = 'offer_made'; terms = { agreed_rent: rent ?? null, owner_accepted_offer: note };
+      tenantPurpose = `Negotiation result for ${title}: the owner agreed to a rent of ${at} a month.${saved} Owner's words: ${note}`;
+      next = 'Tell the tenant the agreed rent and any terms the owner mentioned; it is agreed in principle, nothing is signed. Ask whether they want to go ahead and rent; if yes, ask their move-in date and call deal with action communicate_intent.';
+      say = `Confirm back to the owner that the rent is agreed at ${at} a month, in principle, and that the tenant will be told and the next steps shared. Thank them and end the call.`;
+    } else if (result === 'above_limit') {
+      stage = 'negotiating'; terms = { owner_lowest_rent: rent };
+      tenantPurpose = `Negotiation result for ${title}: the owner's lowest rent is ${inr(rent)} a month, which is above the maximum the tenant set, so nothing was agreed. Owner's words: ${note}`;
+      next = `Tell the tenant the owner's lowest rent. Ask whether they want to accept ${inr(rent)}, set a new goal and maximum, or stop. To accept, repeat it back, get a yes, then call deal with action negotiate_owner, offer "goal rent ${rent}" and max_rent ${rent}. For a new goal and maximum, repeat both back, get a yes, then call deal with action negotiate_owner.`;
+      say = 'Tell the owner their price is above what you can agree today, that you will take it to the tenant and call back if they want to go ahead. Do not agree to it. Thank them and end the call.';
+    } else if (result === 'refused') {
+      stage = 'negotiating';
+      tenantPurpose = `Negotiation result for ${title}: the owner would not lower the rent${listed ? ` from ${inr(listed)}` : ''}. Owner's words: ${note}`;
+      next = `Tell the tenant the owner would not negotiate. Ask whether they want to rent at the asking rent (call deal with action negotiate_owner, offer "goal rent ${listed || '<asking rent>'}" and that as max_rent), try a different offer, or look at other properties.`;
+      say = 'Thank the owner, say you will let the tenant know, and end the call.';
+    } else {
+      stage = 'negotiating';
+      tenantPurpose = `Negotiation update for ${title}: the owner replied: ${note}`;
+      next = 'Tell the tenant exactly what the owner said and ask what they would like to do; for a new goal and maximum, call deal with action negotiate_owner.';
+      say = 'Tell the owner you will pass this to the tenant and call back. Do not agree to anything. Thank them and end the call.';
+    }
+    terms = { ...terms, owner_response: outcome, owner_response_details: note, ...(quoted_rent != null ? { owner_quoted_rent: quoted_rent } : {}), ...(quoted_deposit != null ? { owner_quoted_deposit: quoted_deposit } : {}) };
+  } else {
+    result = outcome;
+    terms = { owner_response: outcome, owner_response_details: note, ...(outcome === 'yes' ? { owner_agreed_to_proceed: true } : {}) };
+    tenantPurpose = `Rental intent update: the owner ${{ yes: 'agreed to go ahead with', no: 'did not agree to' }[outcome] || 'replied about'} your intention to rent ${title}: ${note}. Tell the tenant exactly this; do not claim an agreement beyond what the owner said.`;
+    next = outcome === 'yes' ? 'The owner agreed to proceed. Tell the tenant the owner will share the agreement and next steps; nothing is signed yet.' : 'Explain the owner response and ask what the tenant would like to do next.';
+    say = 'Thank the owner, say the tenant will be informed, and end the call.';
+  }
+  await updateDeal(env, outreach.tenant_phone, listingId, stage, terms);
+  await env.DB.prepare("UPDATE outreach SET status='completed', summary=? WHERE id=?").bind(`Owner response (${result}): ${note}`.slice(0, 500), outreach.id).run();
+  const tenant_call = await callTenant(env, { phone: outreach.tenant_phone, purpose: tenantPurpose.slice(0, 600), visit_id: outreach.visit_id,
+    details: { listing_id: listingId, owner_outcome: outcome, negotiation_result: result, owner_details: note, quoted_rent, quoted_deposit, next } });
+  return { recorded: true, outcome, result, tenant_call, say };
 }
 
 // Tenant-facing AI call (alerts and visit updates). Two-way: the agent can book visits, add to wishlist and update preferences.

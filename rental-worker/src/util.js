@@ -65,3 +65,40 @@ export function normOutcome(raw, text = '') {
   if (/counter/.test(s)) return 'other';
   return a ? 'other' : null;
 }
+
+// Rupee amounts said in words: "35k", "35,000", "35 thousand", "1.2 lakh". Returns every amount >= 1000 in order.
+export function parseAmounts(text) {
+  const out = [];
+  const re = /(\d+(?:[.,]\d+)*)\s*(k\b|thousand|lakh|lac)?/gi;
+  for (const m of String(text || '').matchAll(re)) {
+    let n = parseFloat(m[1].replace(/,/g, ''));
+    const u = (m[2] || '').toLowerCase();
+    if (u === 'k' || u === 'thousand') n *= 1000; else if (u === 'lakh' || u === 'lac') n *= 100000;
+    if (n >= 1000) out.push(Math.round(n));
+  }
+  return out;
+}
+
+// The tenant's goal, for example "ideal rent 35000 with 2 months deposit": first rent amount, and deposit months if said.
+export function parseRentGoal(text) {
+  const s = String(text || '');
+  const months = s.match(/(\d+(?:\.\d+)?)\s*-?\s*months?(?:'|’)?\s*(?:of\s+)?(?:deposit|advance)|(?:deposit|advance)\D{0,20}?(\d+(?:\.\d+)?)\s*months?/i);
+  const noMonths = s.replace(/(\d+(?:\.\d+)?)\s*-?\s*months?/gi, ' ');
+  const depAmount = noMonths.match(/(?:deposit|advance)\D{0,20}?(\d[\d,.]*\s*(?:k\b|thousand|lakh|lac)?)/i);
+  const rentText = depAmount ? noMonths.replace(depAmount[0], ' ') : noMonths;
+  return {
+    rent: parseAmounts(rentText)[0] ?? null,
+    deposit_months: months ? +(months[1] || months[2]) : null,
+    deposit: depAmount ? parseAmounts(depAmount[1])[0] ?? null : null,
+  };
+}
+
+// Concession ladder from the tenant's goal up to their private maximum (never above the asking rent), rounded to 500.
+export function rentLadder(goal, max, listed) {
+  const cap = listed && listed < max ? listed : max;
+  const open = Math.min(goal, cap);
+  if (open >= cap) return [cap];
+  const r = n => Math.round(n / 500) * 500;
+  const steps = [open, r(open + (cap - open) * 0.4), r(open + (cap - open) * 0.75), cap].filter(x => x >= open && x <= cap);
+  return [...new Set(steps)].sort((a, b) => a - b);
+}
