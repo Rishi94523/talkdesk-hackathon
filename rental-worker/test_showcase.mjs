@@ -12,7 +12,7 @@ for (const area of ['Whitefield', 'Koramangala']) {
   assert.equal(d.source, 'demo');
   assert.equal(d.owner_name, 'Rishi D V');
   assert.ok(d.note.includes('Fictional'));
-  assert.ok(!JSON.stringify(d).includes('9900000003'));
+  assert.ok(!/(\+91)?[6-9][0-9]{9}/.test(JSON.stringify(d)), 'showcase must not expose an owner phone number');
   const criteria = { locality: area, bhk: 1, max_rent: 10000, max_deposit: 40000, amenities: ['gym', 'garden'], furnishing: 'full', move_in_date: '2026-12-01', pets: true };
   const result = await findListings(env, criteria, { includeShowcase: true });
   const listing = result.results[0];
