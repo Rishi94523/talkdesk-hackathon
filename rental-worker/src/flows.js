@@ -93,7 +93,7 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
     await noteOnCall(env, { tenant_phone: v.phone, kind: 'tenant_ai', visit_id: v.id, text: `Tenant agreed to the owner's time, ${fmtTime(v.requested_time)}. Viewing booked.` });
     const call = await placeCall(env, { kind: 'owner_ai', to: v.owner_phone, tenant_phone: v.phone, owner_phone: v.owner_phone, visit_id: v.id, purpose: `Viewing confirmation for listing ${v.listing_id}`, briefing: {
       role: 'You are calling the PROPERTY OWNER back on behalf of the tenant.', task: 'viewing_confirmation', visit_id: v.id,
-      spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, this is the MergeConflicts rental assistant calling back about the viewing of your ${place}.`,
+      spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, this is the MergeConflicts rental assistant calling back about the viewing of your ${place}. The tenant has agreed to your time, ${fmtTime(v.requested_time)}, so the viewing is booked for then. Does that still work for you?`,
       what_to_say: `The tenant has agreed to your time: ${fmtTime(v.requested_time)}. The viewing is booked for then.`,
       requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
       when_done: 'If the owner acknowledges, call owner_response with outcome yes. If they now cannot make it, record no, or reschedule with their new time in details. Thank them and end the call.',
