@@ -10,3 +10,5 @@ node_modules/
 .mcp-token
 
 rental-worker/build/
+
+.voice-token

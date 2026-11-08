@@ -6,5 +6,7 @@
   "workers_dev": true,
   "vars": { "CALL_DELAY_SECONDS": "20", "TALKDESK_ORIGIN_NUMBERS": "+12722693171,+12185145620" },
   "triggers": { "crons": ["* * * * *"] },
+  "durable_objects": { "bindings": [{ "name": "VOICE_BRIDGE", "class_name": "VoiceBridge" }] },
+  "migrations": [{ "tag": "v1-voice-bridge", "new_sqlite_classes": ["VoiceBridge"] }],
   "d1_databases": [{"binding":"DB","database_name":"mergeconflicts-rentals-demo","database_id":"8d31ce9d-8a67-4a7d-a1ca-1c9ec1ffa09f"}]
 }

@@ -12,3 +12,6 @@ CREATE TABLE IF NOT EXISTS outreach (id INTEGER PRIMARY KEY AUTOINCREMENT, kind 
 
 -- Last AI tool activity per phone line; queued calls wait until the line has been quiet.
 CREATE TABLE IF NOT EXISTS line_activity (phone TEXT PRIMARY KEY, at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+
+-- Transcripts of calls handled by the ElevenLabs voice agent.
+CREATE TABLE IF NOT EXISTS voice_transcripts (id INTEGER PRIMARY KEY AUTOINCREMENT, outreach_id INTEGER, conversation_id TEXT, transcript TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);

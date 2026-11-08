@@ -124,7 +124,7 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
 // if not, what to offer next and which piece of evidence to use. Nothing is final until the owner explicitly
 // agrees to a rent within the tenant's maximum, or has refused the last offer and named (or declined to name)
 // their lowest rent.
-export function negotiationStep(briefing, { outcome: rawOutcome, details, quoted_rent }) {
+export function negotiationStep(briefing, { outcome: rawOutcome, details, quoted_rent, final = false }) {
   const plan = briefing.negotiation_plan || {};
   const ladder = plan.offers_in_order?.length ? plan.offers_in_order : [];
   const max = briefing.private_limit_never_say?.max_rent ?? briefing.authorized_max_rent ?? ladder.at(-1) ?? null;
@@ -136,6 +136,13 @@ export function negotiationStep(briefing, { outcome: rawOutcome, details, quoted
   const evidence = [...(briefing.comparable_listings || []).map(c => `a ${c}`), ...(briefing.levers || [])];
   const reason = i => evidence.length ? ` Give this reason: ${evidence[i % evidence.length]}` : '';
   const ask = (n, extra = '') => `Not final yet, keep negotiating. Offer ${inr(n)} a month.${reason(st.round)}${extra} Then wait for the owner's answer and call owner_response again with it.`;
+  // A free-negotiating agent reports the final result itself; the tenant's maximum is still enforced.
+  if (final) {
+    if (outcome === 'yes' && named && (!max || named <= max)) return { final: true, result: 'agreed', rent: named };
+    if (named && max && named > max) return { final: true, result: 'above_limit', rent: named };
+    if (outcome === 'yes' && !named) return { final: false, state: st, say: 'Say the agreed monthly rent: call owner_response again with quoted_rent set to it and final true.' };
+    return { final: true, result: 'refused', rent: null };
+  }
   if (st.round > 10) return { final: true, result: named && max && named > max ? 'above_limit' : 'refused', rent: named };
   // Explicit agreement within the maximum: final once the owner has confirmed the exact figure.
   if (outcome === 'yes') {
@@ -205,7 +212,7 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
     ...(purpose === 'negotiation' ? { say: `Tell the tenant you will research comparable flats and local rents, then call the owner shortly after this call ends and negotiate for them, starting from their goal and never going above their maximum, which stays private.${listing.market_comparison?.median_rent ? ` Mention that similar flats in ${listing.locality} have a median asking rent of ${inr(listing.market_comparison.median_rent)}.` : ''} They will get a call back with the final result, so they should keep their line free.` } : {}) };
 }
 
-export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome, details, quoted_rent, quoted_deposit }) {
+export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome, details, quoted_rent, quoted_deposit, final = false }) {
   if (!outreach || !['negotiation', 'signing_intent'].includes(outreach.purpose)) return { error: 'An active negotiation or signing-intent outreach is required.' };
   if (outreach.status === 'completed') return { error: 'This owner response was already recorded; do not send another callback.' };
   const briefing = typeof outreach.briefing === 'string' ? j(outreach.briefing) : (outreach.briefing || {});
@@ -220,7 +227,7 @@ export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome
     const plan = briefing.negotiation_plan || {};
     const max = briefing.private_limit_never_say?.max_rent ?? briefing.authorized_max_rent ?? null;
     const listed = briefing.listed_terms?.rent;
-    const step = negotiationStep(briefing, { outcome, details, quoted_rent });
+    const step = negotiationStep(briefing, { outcome, details, quoted_rent, final });
     if (!step.final) {
       await env.DB.prepare('UPDATE outreach SET briefing=? WHERE id=?').bind(JSON.stringify({ ...briefing, negotiation_state: step.state }), outreach.id).run();
       return { recorded: false, keep_negotiating: true, say: step.say };

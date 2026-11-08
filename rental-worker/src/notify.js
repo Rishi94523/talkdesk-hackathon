@@ -22,6 +22,9 @@ async function talkdeskToken(env) {
 // kind -> env var holding the Studio flow id
 export const FLOW_ENV = { owner_ai: 'TD_FLOW_OWNER_AI', owner_bridge: 'TD_FLOW_OWNER_BRIDGE', tenant_ai: 'TD_FLOW_TENANT_AI' };
 
+// Owner negotiation and signing calls go to the ElevenLabs voice flow when it is configured.
+export const flowFor = (env, kind, purpose) => (kind === 'owner_ai' && env.TD_FLOW_OWNER_VOICE && ['negotiation', 'signing_intent'].includes(purpose)) ? env.TD_FLOW_OWNER_VOICE : env[FLOW_ENV[kind]];
+
 async function startFlow(env, flowId, args) {
   const r = await fetch(`${env.TALKDESK_API || 'https://api.talkdeskapp.com'}/flows/${flowId}/interactions`, {
     method: 'POST', signal: tmo(20000),
@@ -37,7 +40,7 @@ async function startFlow(env, flowId, args) {
  * kind: owner_ai (AI agent talks to owner) | owner_bridge (owner is called, then connected to the tenant) | tenant_ai (AI agent talks to tenant)
  */
 export async function placeCall(env, { kind, to, tenant_phone = null, owner_phone = null, visit_id = null, alert_id = null, purpose, briefing = {} }) {
-  const flowId = env[FLOW_ENV[kind]];
+  const flowId = flowFor(env, kind, purpose);
   const ready = !!(flowId && env.TALKDESK_CLIENT_ID);
   // Deferred calls let the current conversation end first (the demo tenant and owner share one phone).
   const defer = ready && callDelaySeconds(env) > 0;
@@ -79,7 +82,7 @@ export async function dispatchQueued(env) {
     if (!claim.meta.changes) continue;
     await closeEarlierCalls(env, o.to_phone, o.id);
     await researchBeforeDial(env, o);
-    const flowId = env[FLOW_ENV[o.kind]];
+    const flowId = flowFor(env, o.kind, o.purpose);
     let status = 'failed', interaction_id = null, error = null;
     if (!flowId || !env.TALKDESK_CLIENT_ID) error = `Flow for ${o.kind} is no longer configured.`;
     else {

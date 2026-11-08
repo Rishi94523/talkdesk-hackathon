@@ -254,13 +254,14 @@ function makeServer(env) {
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
     visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), owner_phone: z.string().max(20).optional(), outcome: z.string().max(40).optional().describe('yes, no, reschedule (new time in details or proposed_time) or other (counter-offer or conditions)'), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
-  }, async ({ visit_id, outreach_id, owner_phone, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only }) => {
+    final: z.boolean().optional().describe('Negotiation only: true when this is the final result (the owner explicitly confirmed a rent, or will not go lower). Omit to get advice for the next round.'),
+  }, async ({ visit_id, outreach_id, owner_phone, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only, final }) => {
     const responseEnv = dry_run_only ? { ...env, TD_FLOW_TENANT_AI: null } : env;
     if (outreach_id || owner_phone) {
       const outreach = await getOutreach(env, { outreach_id, phone: owner_phone ? normPhone(owner_phone) : null, kind: 'owner_ai' });
       if (!outreach) return { error: 'Outreach not found; do not record an owner response.' };
       if (outreach.kind !== 'owner_ai') return { error: 'Outreach is not an owner call.' };
-      if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(responseEnv, outreach, { outcome, details, quoted_rent, quoted_deposit });
+      if (outreach && ['negotiation', 'signing_intent'].includes(outreach.purpose)) return recordOwnerDiscussion(responseEnv, outreach, { outcome, details, quoted_rent, quoted_deposit, final });
       visit_id ||= outreach?.visit_id;
     }
     if (!visit_id) return { error: 'visit_id or valid outreach_id required' };
@@ -277,10 +278,22 @@ function makeServer(env) {
   return s;
 }
 
+export { VoiceBridge } from './voice.js';
+
+// MCP auth: "Bearer <token>" (Talkdesk) or the bare token (ElevenLabs sends its secret as the header value).
+const mcpAuthorized = (request, env) => !!env.MCP_BEARER_TOKEN && String(request.headers.get('Authorization') || '').replace(/^(Bearer\s+)+/i, '') === env.MCP_BEARER_TOKEN;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (!env.MCP_BEARER_TOKEN || request.headers.get('Authorization') !== `Bearer ${env.MCP_BEARER_TOKEN}`) return new Response('Unauthorized', { status: 401, headers: { 'Cache-Control': 'no-store' } });
+    // Talkdesk External Voice Stream: one Durable Object per call bridges the audio to the ElevenLabs agent.
+    if (url.pathname === '/voice/talkdesk') {
+      const token = request.headers.get('x-mc-voice-token') || url.searchParams.get('token');
+      if (!env.VOICE_STREAM_TOKEN || token !== env.VOICE_STREAM_TOKEN) return new Response('Unauthorized', { status: 401 });
+      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return new Response('Expected a WebSocket upgrade', { status: 426 });
+      return env.VOICE_BRIDGE.get(env.VOICE_BRIDGE.newUniqueId()).fetch(request);
+    }
+    if (!mcpAuthorized(request, env)) return new Response('Unauthorized', { status: 401, headers: { 'Cache-Control': 'no-store' } });
     if (url.pathname !== '/mcp') return new Response('Not found', { status: 404 });
     // Temporary diagnostics: log which MCP methods Talkdesk sends and how they end.
     let rpc = null;
