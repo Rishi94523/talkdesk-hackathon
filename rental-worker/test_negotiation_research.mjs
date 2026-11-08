@@ -18,11 +18,12 @@ assert.equal(showcasePrice({ bhk: 2, max_rent: 30000 }, []).rent, 29000, 'no pee
 const comps = comparables(show, peers);
 assert.equal(comps.length, 3);
 assert.ok(comps.every(c => c.rent <= show.rent * 0.95));
+assert.ok(Math.abs(comps[0].rent - 62000) <= 2000, 'the first example sits at the local median');
 assert.match(spokenListing(comps[0]), /3 BHK in Bellandur, semi-furnished, 1500 sq ft, listed at ₹/);
 const research = researchPoints({
-  pricing: [{ title: 'Bellandur rents 2026', snippet: '3 BHK rent in Bellandur is around ₹60k per month' }, { title: 'Unrelated', snippet: 'Best cafes' }],
+  pricing: [{ title: '2 BHK Flats for Rent in Bellandur', snippet: '2 BHK at ₹76,000 / month' }, { title: 'Bellandur rents 2026', snippet: '3 BHK rent in Bellandur is around ₹60k per month' }, { title: 'Unrelated', snippet: 'Best cafes' }],
   reviews: [{ title: 'r/bangalore: living in Bellandur', snippet: 'Traffic on ORR is brutal and water tankers in summer' }],
-});
+}, show);
 assert.deepEqual(research.map(r => r.source), ['Bellandur rents 2026', 'r/bangalore: living in Bellandur']);
 const { market, levers } = negotiationLevers(show, { peers, comps, research });
 assert.equal(market.sample, 9);

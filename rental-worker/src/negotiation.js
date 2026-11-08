@@ -2,7 +2,7 @@
 // and what residents and recent posts (Reddit, forums, news) say about rents and the locality. It runs just
 // before the owner is dialled (in the queue), so the tenant's call never waits on it.
 import { searchNoBroker, plausibleListing, researchLocality, getListing } from './sources.js';
-import { median, pct } from './util.js';
+import { median, pct, parseAmounts } from './util.js';
 
 const inr = n => '₹' + Number(n).toLocaleString('en-IN');
 const within = (p, ms) => Promise.race([p.catch(() => null), new Promise(r => setTimeout(() => r(null), ms))]);
@@ -14,10 +14,13 @@ export function spokenListing(l) {
 }
 
 // Same-size real listings at least 5% cheaper than this one, most similar (closest in rent) first.
+// Same-size real listings at least 5% cheaper than this one; those nearest the local median first (they make the
+// strongest "this is the going rate" argument), preferring ones with a known size.
 export function comparables(listing, peers, n = 3) {
-  return peers
-    .filter(l => !l.is_showcase && l.id !== listing.id && plausibleListing(l) && (!listing.bhk || l.bhk === listing.bhk) && listing.rent && l.rent <= listing.rent * 0.95 && l.rent >= listing.rent * 0.5)
-    .sort((a, b) => (b.size_sqft ? 1 : 0) - (a.size_sqft ? 1 : 0) || b.rent - a.rent)
+  const same = peers.filter(l => !l.is_showcase && l.id !== listing.id && plausibleListing(l) && (!listing.bhk || l.bhk === listing.bhk));
+  const med = median(same.map(l => l.rent)) ?? listing.rent * 0.85;
+  return same.filter(l => listing.rent && l.rent <= listing.rent * 0.95 && l.rent >= listing.rent * 0.5)
+    .sort((a, b) => Math.abs(a.rent - med) - Math.abs(b.rent - med) || (b.size_sqft ? 1 : 0) - (a.size_sqft ? 1 : 0))
     .slice(0, n);
 }
 
@@ -26,8 +29,11 @@ const DOWNSIDE = /traffic|water|tanker|flood|power cut|noise|construction|commut
 const clip = s => String(s || '').replace(/\s+/g, ' ').slice(0, 220);
 
 // Turn search results into a few short, attributable points. Only pricing and downside evidence is useful here.
-export function researchPoints(research) {
-  const pick = (items, re, n) => (items || []).filter(x => re.test(`${x.title} ${x.snippet}`)).slice(0, n)
+export function researchPoints(research, listing = {}) {
+  const otherSize = listing.bhk ? new RegExp(`\\b(?!${listing.bhk}\\s?bhk)\\d\\s?bhk`, 'i') : null;
+  const tooHigh = x => listing.rent && parseAmounts(`${x.title} ${x.snippet}`).some(n => n > listing.rent && n < listing.rent * 3);
+  const fits = (x, re) => re.test(`${x.title} ${x.snippet}`) && (re !== PRICE || (!(otherSize && otherSize.test(`${x.title} ${x.snippet}`)) && !tooHigh(x)));
+  const pick = (items, re, n) => (items || []).filter(x => fits(x, re)).slice(0, n)
     .map(x => ({ source: clip(x.title).slice(0, 90) || 'web source', point: clip(x.snippet) }));
   return [...pick(research?.pricing, PRICE, 2), ...pick(research?.reviews, DOWNSIDE, 2)];
 }
@@ -55,9 +61,10 @@ export async function enrichNegotiation(env, briefing) {
   ]);
   const peers = nb?.results || [];
   const comps = comparables(listing, peers);
-  const research = researchPoints(web);
+  const research = researchPoints(web, listing);
   const { market, levers } = negotiationLevers(listing, { peers, market: listing.market_comparison, comps, research });
   return { ...briefing, research_done: true, market, comparable_listings: comps.map(spokenListing), web_research: research,
     levers: [...levers, ...(briefing.levers || [])],
-    how_to_use_research: 'Argue with these facts, one at a time, starting with the strongest: the local median, then a cheaper comparable listing, then the deposit, then a resident or market point. Say where each point comes from in plain words (for example "listings on NoBroker" or "residents on Reddit"). Never invent figures, never read a URL and never claim the tenant has seen a listing.' };
+    examples_to_quote: comps.map(spokenListing),
+    how_to_use_research: 'If the owner asks for examples, read examples_to_quote one by one. Argue with these facts, one at a time, starting with the strongest: the local median, then a cheaper comparable listing, then the deposit, then a resident or market point. Say where each point comes from in plain words (for example "listings on NoBroker" or "residents on Reddit"). Never invent figures, never read a URL and never claim the tenant has seen a listing.' };
 }

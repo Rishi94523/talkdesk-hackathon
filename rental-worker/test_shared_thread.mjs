@@ -23,7 +23,7 @@ const answer = async () => { // the next queued call rings and its agent loads c
   age();
   if (db.prepare('SELECT COUNT(*) n FROM line_activity').get().n) {
     assert.deepEqual(await dispatchQueued(env), [], 'must not ring a line that was active seconds ago');
-    db.prepare("UPDATE line_activity SET at=datetime('now','-31 seconds')").run();
+    db.prepare("UPDATE line_activity SET at=datetime('now','-46 seconds')").run();
   }
   await dispatchQueued(env);
   const o = await getOutreach(env, { phone: PHONE });

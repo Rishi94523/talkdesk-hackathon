@@ -48,17 +48,19 @@ export function dealAction(raw, t = {}) {
 
 const spokenTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' });
 // A short spoken recap of the caller's open threads so a returning call can continue where it left off.
+const inrSpoken = n => `${Number(n).toLocaleString('en-IN')} rupees`;
 async function callerRecap(env, visits, deals) {
   const parts = [];
   for (const v of visits.filter(v => v.status !== 'cancelled').slice(0, 2)) {
     const l = await getListing(env, v.listing_id);
     const name = l ? `${l.title || 'the property'} (${l.bhk ? l.bhk + ' BHK, ' : ''}${l.locality || ''})` : v.listing_id;
     const st = { confirmed: 'the owner confirmed', pending: 'waiting for the owner', declined: 'the owner declined', owner_proposed_time: 'the owner proposed another time', needs_attention: 'the owner needs more information' }[v.status] || v.status;
-    parts.push(`Viewing of ${name} on ${spokenTime(v.requested_time)}: ${st}.`);
+    const ask = l?.rent ? ` Asking rent ${inrSpoken(l.rent)} a month${l.deposit ? ', deposit ' + inrSpoken(l.deposit) : ''}${l.market_comparison?.median_rent ? `; similar flats nearby have a median rent of ${inrSpoken(l.market_comparison.median_rent)}` : ''}.` : '';
+    parts.push(`Viewing of ${name} on ${spokenTime(v.requested_time)}: ${st}.${ask}`);
   }
   for (const d of deals.slice(0, 2)) {
     const t = j(d.terms);
-    const bits = [d.stage && `stage ${d.stage.replace(/_/g, ' ')}`, t.tenant_offer && `your offer ${t.tenant_offer}`, t.authorized_max_rent && `your limit ${t.authorized_max_rent}`, t.owner_response && `owner said ${t.owner_response}${t.owner_response_details && t.owner_response_details !== t.owner_response ? ' (' + t.owner_response_details + ')' : ''}`].filter(Boolean);
+    const bits = [d.stage && `stage ${d.stage.replace(/_/g, ' ')}`, t.tenant_offer && `your goal ${t.tenant_offer}`, t.authorized_max_rent && `your limit ${t.authorized_max_rent}`, t.agreed_rent && `agreed rent ${inrSpoken(t.agreed_rent)}`, t.owner_lowest_rent && `owner's lowest ${inrSpoken(t.owner_lowest_rent)}`, t.owner_response && `owner said ${t.owner_response}${t.owner_response_details && t.owner_response_details !== t.owner_response ? ' (' + t.owner_response_details + ')' : ''}`].filter(Boolean);
     if (bits.length) parts.push(`Deal on ${d.listing_id.startsWith('MC-SHOWCASE') ? 'MergeConflicts Garden Residences' : d.listing_id}: ${bits.join(', ')}.`);
   }
   return parts.length ? parts.join(' ') : null;

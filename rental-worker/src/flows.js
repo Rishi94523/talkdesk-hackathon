@@ -120,6 +120,48 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
 }
 
 // A negotiation or intent is a separate owner conversation, never a call bridge.
+// One negotiation round. The owner agent reports every answer; the Worker decides whether it is final and,
+// if not, what to offer next and which piece of evidence to use. Nothing is final until the owner explicitly
+// agrees to a rent within the tenant's maximum, or has refused the last offer and named (or declined to name)
+// their lowest rent.
+export function negotiationStep(briefing, { outcome: rawOutcome, details, quoted_rent }) {
+  const plan = briefing.negotiation_plan || {};
+  const ladder = plan.offers_in_order?.length ? plan.offers_in_order : [];
+  const max = briefing.private_limit_never_say?.max_rent ?? briefing.authorized_max_rent ?? ladder.at(-1) ?? null;
+  const st = { round: 0, asked_lowest: false, confirm: null, ...(briefing.negotiation_state || {}) };
+  const outcome = normOutcome(rawOutcome, details) || 'other';
+  const amounts = parseAmounts(details);
+  const named = quoted_rent ?? (outcome === 'yes' && amounts.length ? amounts.at(-1) : null);
+  const offer = ladder[st.round] ?? ladder.at(-1);
+  const evidence = [...(briefing.comparable_listings || []).map(c => `a ${c}`), ...(briefing.levers || [])];
+  const reason = i => evidence.length ? ` Give this reason: ${evidence[i % evidence.length]}` : '';
+  const ask = (n, extra = '') => `Not final yet, keep negotiating. Offer ${inr(n)} a month.${reason(st.round)}${extra} Then wait for the owner's answer and call owner_response again with it.`;
+  if (st.round > 10) return { final: true, result: named && max && named > max ? 'above_limit' : 'refused', rent: named };
+  // Explicit agreement within the maximum: final once the owner has confirmed the exact figure.
+  if (outcome === 'yes') {
+    const rent = named ?? st.confirm ?? offer;
+    if (max && rent > max) return st.round >= ladder.length - 1
+      ? { final: true, result: 'above_limit', rent }
+      : { final: false, state: { ...st, round: st.round + 1 }, say: ask(ladder[st.round + 1], ' Do not agree to the higher figure.') };
+    if (st.confirm === rent) return { final: true, result: 'agreed', rent };
+    return { final: false, state: { ...st, confirm: rent }, say: `Not final yet. Ask the owner to confirm clearly: "So we are agreed at ${inr(rent)} a month${plan.deposit_goal ? ' with a ' + plan.deposit_goal + ' deposit' : ''}?" If they say yes, call owner_response with outcome yes, quoted_rent ${rent} and details "Owner confirmed ${rent}".` };
+  }
+  // The owner named a figure.
+  if (named) {
+    if (max && named <= max) {
+      const nextOffer = ladder.find(x => x > offer && x < named);
+      if (nextOffer) return { final: false, state: { ...st, round: ladder.indexOf(nextOffer) }, say: ask(nextOffer, ` If they insist on ${inr(named)}, you may accept it: ask them to confirm ${inr(named)} and record yes with that quoted_rent.`) };
+      return { final: false, state: { ...st, confirm: named }, say: `${inr(named)} is acceptable. Ask the owner to confirm: "So we are agreed at ${inr(named)} a month?" If yes, call owner_response with outcome yes and quoted_rent ${named}.` };
+    }
+    if (st.round < ladder.length - 1) return { final: false, state: { ...st, round: st.round + 1 }, say: ask(ladder[st.round + 1], ` Their ${inr(named)} is too high; do not agree to it.`) };
+    return { final: true, result: 'above_limit', rent: named };
+  }
+  // A plain refusal or other reply: next offer, then ask for their lowest rent, then stop.
+  if (st.round < ladder.length - 1) return { final: false, state: { ...st, round: st.round + 1 }, say: ask(ladder[st.round + 1]) };
+  if (!st.asked_lowest) return { final: false, state: { ...st, asked_lowest: true }, say: `Not final yet. ${inr(offer)} is the most you can offer. Ask the owner for the lowest monthly rent they would accept, then call owner_response with outcome no and quoted_rent as that figure (or no quoted_rent if they will not say).` };
+  return { final: true, result: 'refused', rent: null };
+}
+
 // Negotiation is carried out by the owner agent on the tenant's behalf: the tenant sets a goal and a private
 // maximum, the agent opens at the goal and concedes step by step, and the tenant is called only with the result.
 export async function startOwnerDiscussion(env, { phone, listing_id, purpose, offer, max_rent, max_deposit, move_in_date, notes }) {
@@ -177,20 +219,21 @@ export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome
   if (outreach.purpose === 'negotiation') {
     const plan = briefing.negotiation_plan || {};
     const max = briefing.private_limit_never_say?.max_rent ?? briefing.authorized_max_rent ?? null;
-    const amounts = parseAmounts(details);
-    const rent = quoted_rent ?? (amounts.length ? Math.min(...amounts) : null);
     const listed = briefing.listed_terms?.rent;
-    if (outcome !== 'no' && rent && max && rent <= max) result = 'agreed';
-    else if (outcome === 'yes' && !rent) result = 'agreed';
-    else if (rent && max && rent > max) result = 'above_limit';
-    else result = outcome === 'no' ? 'refused' : 'other';
+    const step = negotiationStep(briefing, { outcome, details, quoted_rent });
+    if (!step.final) {
+      await env.DB.prepare('UPDATE outreach SET briefing=? WHERE id=?').bind(JSON.stringify({ ...briefing, negotiation_state: step.state }), outreach.id).run();
+      return { recorded: false, keep_negotiating: true, say: step.say };
+    }
+    result = step.result;
+    const rent = step.rent;
     if (result === 'agreed') {
       const at = rent ? inr(rent) : `the last offer${plan.offers_in_order ? ' of ' + inr(plan.offers_in_order.at(-1)) : ''}`;
       const saved = rent && listed && listed > rent ? ` That is ${inr(listed - rent)} a month below the asking rent of ${inr(listed)}.` : '';
       stage = 'offer_made'; terms = { agreed_rent: rent ?? null, owner_accepted_offer: note };
       tenantPurpose = `Negotiation result for ${title}: the owner agreed to a rent of ${at} a month.${saved} Owner's words: ${note}`;
       next = 'Tell the tenant the agreed rent and any terms the owner mentioned; it is agreed in principle, nothing is signed. Ask whether they want to go ahead and rent; if yes, ask their move-in date and call deal with action communicate_intent.';
-      say = `Confirm back to the owner that the rent is agreed at ${at} a month, in principle, and that the tenant will be told and the next steps shared. Thank them and end the call.`;
+      say = `Confirm back to the owner that the rent is agreed at ${at} a month, in principle, and that the tenant will be told and the next steps shared. Thank them and end the call now.`;
     } else if (result === 'above_limit') {
       stage = 'negotiating'; terms = { owner_lowest_rent: rent };
       tenantPurpose = `Negotiation result for ${title}: the owner's lowest rent is ${inr(rent)} a month, which is above the maximum the tenant set, so nothing was agreed. Owner's words: ${note}`;
@@ -200,7 +243,7 @@ export async function recordOwnerDiscussion(env, outreach, { outcome: rawOutcome
       stage = 'negotiating';
       tenantPurpose = `Negotiation result for ${title}: the owner would not lower the rent${listed ? ` from ${inr(listed)}` : ''}. Owner's words: ${note}`;
       next = `Tell the tenant the owner would not negotiate. Ask whether they want to rent at the asking rent (call deal with action negotiate_owner, offer "goal rent ${listed || '<asking rent>'}" and that as max_rent), try a different offer, or look at other properties.`;
-      say = 'Thank the owner, say you will let the tenant know, and end the call.';
+      say = 'Thank the owner, say you will let the tenant know, and end the call now.';
     } else {
       stage = 'negotiating';
       tenantPurpose = `Negotiation update for ${title}: the owner replied: ${note}`;

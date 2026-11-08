@@ -78,8 +78,8 @@ assert.equal(r5.status, 'confirmed');
 assert.equal(outreach().length, before);
 assert.equal(last().status, 'completed');
 
-// 7. Negotiation on the tenant's behalf: goal 40000, max 43000, asking 45000. The owner call carries a concession
-// ladder, the agent agrees within it, and the tenant gets one call with the final result.
+// 7. Negotiation on the tenant's behalf: goal 40000, max 43000, asking 45000. The Worker drives the rounds:
+// a refusal or a figure mentioned in passing is never final, and the tenant is called once, with the result.
 const n1 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40k with 2 months deposit', max_rent: 43000 });
 assert.equal(n1.call.kind, 'owner_ai');
 assert.match(n1.say, /negotiate/);
@@ -89,29 +89,46 @@ assert.equal(b1.negotiation_plan.deposit_goal, '2 months');
 assert.match(b1.what_to_say, /Open by offering ₹40,000/);
 assert.ok(!b1.what_to_say.includes('43,000'), 'opening line never names the maximum');
 db.prepare("UPDATE outreach SET status='in_progress' WHERE id=?").run(n1.call.outreach_id);
-const o1 = db.prepare('SELECT * FROM outreach WHERE id=?').get(n1.call.outreach_id);
-const c1 = await recordOwnerDiscussion(env, o1, { outcome: 'yes', details: 'Owner agreed to 41,500 a month, down from 45000, with 2 months deposit' });
-assert.equal(c1.result, 'agreed');
-assert.match(c1.say, /agreed at ₹41,500/);
+const row = () => db.prepare('SELECT * FROM outreach WHERE id=?').get(n1.call.outreach_id);
+const calls = () => outreach().length;
+const before7 = calls();
+// The live failure: the owner refuses the opening and mentions what the previous tenant paid.
+const q1 = await recordOwnerDiscussion(env, row(), { outcome: 'no', details: 'Owner refuses 40,000; the previous tenant paid 44,000 and there are renovation costs' });
+assert.equal(q1.recorded, false);
+assert.match(q1.say, /Offer ₹41,000/);
+assert.equal(row().status, 'in_progress', 'a refusal mid-negotiation is not final');
+assert.equal(calls(), before7, 'no tenant callback yet');
+const q2 = await recordOwnerDiscussion(env, row(), { outcome: 'no', details: 'Owner says 42,000 is the lowest', quoted_rent: 42000 });
+assert.equal(q2.recorded, false);
+assert.match(q2.say, /₹42,000 is acceptable. Ask the owner to confirm/);
+const q3 = await recordOwnerDiscussion(env, row(), { outcome: 'yes', details: 'Owner confirmed 42000', quoted_rent: 42000 });
+assert.equal(q3.result, 'agreed');
+assert.match(q3.say, /agreed at ₹42,000/);
+assert.equal(row().status, 'completed');
+assert.equal(calls(), before7 + 1, 'exactly one tenant callback');
 assert.equal(last().kind, 'tenant_ai');
-assert.match(last().purpose, /agreed to a rent of ₹41,500 .*₹3,500 a month below/);
+assert.match(last().purpose, /agreed to a rent of ₹42,000 .*₹3,000 a month below/);
 assert.match(JSON.parse(last().briefing).next, /go ahead and rent/);
-const deal = JSON.parse(db.prepare('SELECT terms FROM deals WHERE phone=? AND listing_id=?').get(T, L).terms);
-assert.equal(deal.agreed_rent, 41500);
+assert.equal(JSON.parse(db.prepare('SELECT terms FROM deals WHERE phone=? AND listing_id=?').get(T, L).terms).agreed_rent, 42000);
 
-// 8. Owner will not come down to the maximum -> tenant told the lowest rent; accepting it starts a single-step negotiation.
+// 8. Owner will not come down to the maximum: offers climb to 43000, then the owner's lowest is asked; 44000 is above it.
 const n2 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40000', max_rent: 43000 });
-const o2 = db.prepare('SELECT * FROM outreach WHERE id=?').get(n2.call.outreach_id);
-const c2 = await recordOwnerDiscussion(env, o2, { outcome: 'no', details: 'Owner will not go below 44000', quoted_rent: 44000 });
+const row2 = () => db.prepare('SELECT * FROM outreach WHERE id=?').get(n2.call.outreach_id);
+const says = [];
+for (let i = 0; i < 4; i++) says.push((await recordOwnerDiscussion(env, row2(), { outcome: 'no', details: 'No, too low' })).say);
+assert.match(says[0], /Offer ₹41,000/); assert.match(says[1], /Offer ₹42,500/); assert.match(says[2], /Offer ₹43,000/);
+assert.match(says[3], /lowest monthly rent/);
+const c2 = await recordOwnerDiscussion(env, row2(), { outcome: 'no', details: 'Owner will not go below 44000', quoted_rent: 44000 });
 assert.equal(c2.result, 'above_limit');
 assert.match(c2.say, /Do not agree/);
 assert.match(last().purpose, /lowest rent is ₹44,000/);
 assert.match(JSON.parse(last().briefing).next, /goal rent 44000" and max_rent 44000/);
-// An agent that "agrees" above the maximum is never recorded as a deal.
+// An agent "yes" above the maximum is never a deal: it is told to make the next offer instead.
 const n3 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 40000', max_rent: 43000 });
-const c3 = await recordOwnerDiscussion(env, db.prepare('SELECT * FROM outreach WHERE id=?').get(n3.call.outreach_id), { outcome: 'yes', details: 'Agreed at 44500', quoted_rent: 44500 });
-assert.equal(c3.result, 'above_limit');
+const r33 = await recordOwnerDiscussion(env, db.prepare('SELECT * FROM outreach WHERE id=?').get(n3.call.outreach_id), { outcome: 'yes', details: 'Agreed at 44500', quoted_rent: 44500 });
+assert.equal(r33.recorded, false);
+assert.match(r33.say, /Do not agree to the higher figure/);
 const n4 = await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 44000', max_rent: 44000 });
 assert.deepEqual(JSON.parse(db.prepare('SELECT briefing FROM outreach WHERE id=?').get(n4.call.outreach_id).briefing).negotiation_plan.offers_in_order, [44000]);
 assert.match((await startOwnerDiscussion(env, { phone: T, listing_id: L, purpose: 'negotiation', offer: 'goal rent 45000', max_rent: 43000 })).error, /above the maximum/);
-console.log('PASS viewing relay alternates owner and tenant; negotiation runs on the tenant\'s behalf with one result call');
+console.log('PASS viewing relay alternates owner and tenant; negotiation runs round by round with one result call');

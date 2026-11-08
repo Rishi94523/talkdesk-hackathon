@@ -68,7 +68,7 @@ export async function touchLine(env, phone) {
   if (!phone) return;
   try { await env.DB.prepare("INSERT INTO line_activity(phone,at) VALUES(?,CURRENT_TIMESTAMP) ON CONFLICT(phone) DO UPDATE SET at=CURRENT_TIMESTAMP").bind(phone).run(); } catch {}
 }
-export const lineQuietSeconds = env => Math.max(0, +(env.LINE_QUIET_SECONDS ?? 30) || 0);
+export const lineQuietSeconds = env => Math.max(0, +(env.LINE_QUIET_SECONDS ?? 45) || 0);
 
 export async function dispatchQueued(env) {
   const rows = (await env.DB.prepare("SELECT * FROM outreach WHERE status='queued' AND created_at <= datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM line_activity la WHERE la.phone=outreach.to_phone AND la.at > datetime('now', ?)) ORDER BY id LIMIT 5")

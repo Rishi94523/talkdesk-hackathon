@@ -27,7 +27,7 @@ assert.deepEqual(briefing.negotiation_plan.offers_in_order, [30000, 31000, 31500
 assert.match(briefing.instruction, /Never mention the tenant's maximum/);
 assert.deepEqual(briefing.private_limit_never_say, { max_rent: 32000, max_deposit: null });
 assert.match((await recordOwnerDiscussion(env, { purpose: 'negotiation', status: 'completed' }, { outcome: 'yes' })).error, /already recorded/);
-const recorded = await recordOwnerDiscussion(env, { id: 8, purpose: 'negotiation', status: 'in_progress', tenant_phone: '+911111111111', visit_id: 3, briefing: { listing: { id: 'demo' }, private_limit_never_say: { max_rent: 32000 } } }, { outcome: 'yes', details: 'Agreed to 30000' });
+const recorded = await recordOwnerDiscussion(env, { id: 8, purpose: 'negotiation', status: 'in_progress', tenant_phone: '+911111111111', visit_id: 3, briefing: { listing: { id: 'demo' }, private_limit_never_say: { max_rent: 32000 }, negotiation_plan: { offers_in_order: [30000, 32000] }, negotiation_state: { round: 0, confirm: 30000 } } }, { outcome: 'yes', details: 'Owner confirmed 30000', quoted_rent: 30000 });
 assert.equal(recorded.result, 'agreed');
 assert.equal(recorded.recorded, true);
 assert.equal(recorded.tenant_call.status, 'dry_run');
