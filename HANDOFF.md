@@ -119,6 +119,11 @@ To switch on: create Studio flow (copy of the owner AI flow) whose AI step is re
 
 
 ## Codex task: finish the ElevenLabs voice setup (use computer use for Talkdesk)
+
+### Completion checkpoint (2026-11-08, Codex)
+- Duplicated the owner flow as `Owner_Voice_Call_MergeConflicts`, retained its outbound-call routing, changed the existing autopilot node to External Voice Stream with the bridge endpoint and authenticated header, validated and published V1. API trigger ID: `7b408252594b4b03999140392d5affb3` (editor ID: `681df9c832b4469bbf21ea3a9b60f512`).
+- Set `TD_FLOW_OWNER_VOICE` to the API trigger ID and confirmed the secret exists. Viewing calls continue to use the existing owner flow.
+- The no-phone `tools/fake_talkdesk_stream.mjs` self-test returned 2 media frames and 3.8 seconds of audio. This tests the bridge, not whether Talkdesk supports the stream on an API-started outbound call. A live negotiation test remains for the user; no real call was placed by Codex.
 Goal: owner negotiation calls (purpose `negotiation` / `signing_intent`) are spoken by the ElevenLabs agent through the deployed bridge. Everything on the Worker and ElevenLabs side is done (see the section above); what is missing is one Talkdesk Studio flow and one Worker secret.
 
 ### Ground rules (shared Talkdesk tenant)
