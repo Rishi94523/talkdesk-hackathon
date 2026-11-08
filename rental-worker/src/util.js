@@ -48,8 +48,16 @@ export function parseSpokenTime(text, baseIso) {
     if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0;
     if (!/am|pm/.test(ap) && h >= 1 && h <= 7) h += 12; // "at 3" means afternoon for a viewing
     return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + dayShift, h, min) - IST_MS).toISOString();
-  }).filter(Boolean);
-  if (!times.length) return null;
+  });
+  if (!times.some(Boolean)) return null;
+  // "Cannot do 2 pm but free at 3 pm": the time after free / available / instead / works is the proposal, never one
+  // the owner rejected ("cannot do 2 pm"); for a range ("free from 1 to 3 pm") the start of the range.
+  const offer = t.search(/(?<!\b(?:not|n't|never)\s)\b(free|available|instead|works|work for|how about|can do|okay with|ok with|prefer|let'?s do|make it)\b/);
+  const rejected = new Set(found.filter(m => /\b(can'?t|cannot|can not|not|busy|unavailable|won'?t)\b(?:(?!\b(?:but|free|available|instead|works?|only)\b)[^.,;]){0,20}$/.test(t.slice(Math.max(0, m.index - 30), m.index))).map(m => m.index));
+  const tagged = found.map((m, i) => ({ m, x: times[i] })).filter(o => o.x);
+  const pick = (offer >= 0 && tagged.find(o => o.m.index > offer && !rejected.has(o.m.index)))
+    || tagged.find(o => !rejected.has(o.m.index) && (!baseIso || Math.abs(new Date(o.x) - base) > 5 * 60000));
+  if (pick) return pick.x;
   return (baseIso && times.find(x => Math.abs(new Date(x) - base) > 5 * 60000)) || times[0];
 }
 

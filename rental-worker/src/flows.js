@@ -341,6 +341,8 @@ export async function applyOwnerResponse(env, visitId, rawOutcome, text, rawTime
     : `The owner said something about the ${place} that needs the tenant's input: ${(text || '').slice(0, 160)}.`;
   if (status === 'confirmed') await env.DB.prepare("INSERT INTO deals(phone,listing_id,stage) VALUES(?,?,'visit_scheduled') ON CONFLICT(phone,listing_id) DO UPDATE SET stage='visit_scheduled', updated_at=CURRENT_TIMESTAMP").bind(v.phone, v.listing_id).run();
   if (status === 'confirmed') await recordProperty(env, v.phone, v.listing_id, 'visit_confirmed', text, null, `visit-confirmed:${visitId}`);
+  // A corrected answer in the same owner call replaces the update not yet delivered, so the tenant hears only the latest.
+  if (notifyTenant) await env.DB.prepare("UPDATE outreach SET status='superseded' WHERE kind='tenant_ai' AND visit_id=? AND status IN ('queued','initiating','created')").bind(visitId).run();
   const tenant_call = notifyTenant ? await callTenant(env, { phone: v.phone, visit_id: visitId, purpose: 'Visit update: ' + update, details: { visit: { id: visitId, status, time: when, listing_id: v.listing_id, owner_notes: text }, next: status === 'confirmed' ? 'Confirm the time and answer questions. Nothing else to arrange.'
     : status === 'owner_proposed_time' ? `Ask whether ${when} works. If yes, call visits with action accept_owner_time. If they want a different time, ask for it and call visits with action propose_time and requested_time. The owner is called back automatically after this call.`
     : 'Ask whether the tenant wants to propose another time (visits action propose_time with requested_time) or look at other options.' } }) : null;
