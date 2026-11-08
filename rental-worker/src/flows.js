@@ -87,7 +87,9 @@ export async function tenantVisitReply(env, v, { reply, requested_time, text }) 
   const listing = await getListing(env, v.listing_id);
   const place = listing ? `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || ''}`.trim() : 'the property';
   const proposed = parseSpokenTime(requested_time || text, v.requested_time);
-  if (reply === 'accept' && proposed && Math.abs(new Date(proposed) - new Date(v.requested_time)) > 5 * 60000) reply = 'propose';
+  // Accepting with a restated timestamp that is the owner's time read as UTC (5 h 30 min off) is still an acceptance.
+  const utcSlip = proposed && Math.abs(Math.abs(new Date(proposed) - new Date(v.requested_time)) - 5.5 * 3600000) < 60000;
+  if (reply === 'accept' && proposed && !utcSlip && Math.abs(new Date(proposed) - new Date(v.requested_time)) > 5 * 60000) reply = 'propose';
   if (reply === 'accept') {
     if (!['owner_proposed_time', 'confirmed'].includes(v.status)) return { error: `There is no time from the owner to accept (visit status: ${v.status}). Ask the tenant for a time and call visits with action propose_time and requested_time.` };
     await confirmProposedTime(env, v.id);

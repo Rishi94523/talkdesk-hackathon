@@ -23,8 +23,11 @@ const NUM = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, half: 0.5 };
 const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 export function parseSpokenTime(text, baseIso) {
   if (!text) return null;
-  const direct = new Date(text);
-  if (/\d{4}-\d{2}-\d{2}T/.test(text) && !isNaN(direct)) return direct.toISOString();
+  // Agents often send "2026-11-09T15:00:00" or "...15:00:00Z" meaning India time; a UTC reading would be 8:30 pm.
+  let iso = String(text).trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z?$/.test(iso)) iso = iso.replace(/Z$/, '') + '+05:30';
+  const direct = new Date(iso);
+  if (/\d{4}-\d{2}-\d{2}T/.test(iso) && !isNaN(direct)) return direct.toISOString();
   const t = String(text).toLowerCase();
   const base = new Date(baseIso || Date.now());
   const shift = t.match(/\b(\d+(?:\.\d+)?|an?|one|two|three|four|half an?)\s*(hours?|hrs?)\s*(later|after|earlier|before)\b|\bby\s+(\d+(?:\.\d+)?|an?|one|two|three)\s*(hours?|hrs?)\b/);
