@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { z } from 'zod';
-import { reply, fail, normPhone, j, parseSpokenTime } from './util.js';
+import { reply, fail, normPhone, j, parseSpokenTime, normOutcome } from './util.js';
 import { findListings, getListing, marketStats, researchLocality, firecrawlSearch, parallelSearch, scrapeMarkdown, TOPIC_NAMES, briefOf, factsOf, webLeadListing, cacheListings } from './sources.js';
 import { getOutreach, dispatchQueued, conversationThread, touchLine } from './notify.js';
 import { getMemory, saveSummary, recordProperty, previouslyDiscussed, searchMemory } from './memory.js';
@@ -254,7 +254,7 @@ function makeServer(env) {
   tool('owner_response', "Owner-Liaison agent: record the owner's answer to the viewing request: outcome yes / no / reschedule (with proposed_time ISO+05:30) / other, plus quoted_rent/quoted_deposit if mentioned. Our tenant agent then calls the tenant back.", {
     visit_id: z.number().int().optional(), outreach_id: z.number().int().optional(), owner_phone: z.string().max(20).optional(), outcome: z.string().max(40).optional().describe('yes, no, reschedule (new time in details or proposed_time) or other (counter-offer or conditions)'), details: z.string().max(400).optional(), dry_run_only: z.boolean().optional().describe('For tests: record the response without placing any callback.'),
     proposed_time: z.string().max(40).optional(), quoted_rent: z.number().int().optional(), quoted_deposit: z.number().int().optional(),
-    final: z.boolean().optional().describe('Negotiation only: true when this is the final result (the owner explicitly confirmed a rent, or will not go lower). Omit to get advice for the next round.'),
+    final: z.boolean().optional().describe('True when this is the final result (the owner explicitly confirmed a rent, or will not go lower). Omit to get advice for the next round.'),
   }, async ({ visit_id, outreach_id, owner_phone, outcome, details, proposed_time, quoted_rent, quoted_deposit, dry_run_only, final }) => {
     const responseEnv = dry_run_only ? { ...env, TD_FLOW_TENANT_AI: null } : env;
     if (outreach_id || owner_phone) {
@@ -266,6 +266,17 @@ function makeServer(env) {
     }
     if (!visit_id) return { error: 'visit_id or valid outreach_id required' };
     const confirmation = !!(await env.DB.prepare("SELECT 1 FROM outreach WHERE visit_id=? AND kind='owner_ai' AND purpose LIKE 'Viewing confirmation%' AND status IN ('dialing','in_progress') AND created_at >= datetime('now','-20 minutes') LIMIT 1").bind(visit_id).first());
+    // A question or unclear reply ("why are you calling?") is not the owner's answer: the first time, send the agent
+    // back to explain the request and ask for yes / no / another time, instead of ending the call and ringing the tenant.
+    if (normOutcome(outcome, details) === 'other' && final !== true) {
+      const live = await env.DB.prepare("SELECT id,briefing FROM outreach WHERE visit_id=? AND kind='owner_ai' AND status IN ('initiating','dialing','in_progress') ORDER BY id DESC LIMIT 1").bind(visit_id).first();
+      const b = j(live?.briefing);
+      if (live && !b.other_nudged) {
+        await env.DB.prepare('UPDATE outreach SET briefing=? WHERE id=?').bind(JSON.stringify({ ...b, other_nudged: true }), live.id).run();
+        const v = await env.DB.prepare('SELECT requested_time FROM visits WHERE id=?').bind(visit_id).first();
+        return { recorded: false, keep_talking: true, say: `Not recorded yet; the owner has not answered. Explain clearly: a prospective tenant would like to view the property on ${spokenTime(v?.requested_time)}. Answer any question the owner asked, then ask: "Would that time work for you?" Call owner_response again with yes, no, or reschedule with their new time in details. Use outcome other only if they set a condition, and then pass final true.`.replace(/\s+/g, ' ') };
+      }
+    }
     const r = await applyOwnerResponse(responseEnv, visit_id, outcome, details, proposed_time, { confirmation });
     if (!r.error && (quoted_rent || quoted_deposit)) {
       const v = await env.DB.prepare('SELECT phone,listing_id FROM visits WHERE id=?').bind(visit_id).first();

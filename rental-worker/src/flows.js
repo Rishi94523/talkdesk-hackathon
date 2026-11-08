@@ -51,11 +51,11 @@ function ownerBriefing(v, listing, prof, followUp = null) {
   return {
     role: 'You are calling the PROPERTY OWNER on behalf of a prospective tenant.',
     goal: `Confirm a viewing of the ${place} property on ${fmtTime(v.requested_time)}, or agree an alternative time. Optionally confirm current rent/deposit and availability.`,
-    ...(followUp ? { what_to_say: followUp } : {}),
     tenant: { name: prof?.name || 'the prospective tenant', budget: prof?.max_rent, move_in: prof?.move_in_date },
     listing: listing ? { id: listing.id, title: listing.title, locality: listing.locality, rent: listing.rent, deposit: listing.deposit, url: listing.url } : null,
     visit_id: v.id, requested_time: v.requested_time, requested_time_spoken: fmtTime(v.requested_time),
-    spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing.`,
+    spoken_intro: `Hello${v.owner_name ? ' ' + v.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of ${prof?.name || 'a prospective tenant'} about your ${place} rental listing. They would like to view it on ${fmtTime(v.requested_time)}. Would that time work for you?`,
+    what_to_say: followUp || `A prospective tenant would like to view your ${place} on ${fmtTime(v.requested_time)}. Would that time work for you?`,
     when_done: 'Call owner_response straight away: yes, no, or reschedule with the owner\'s new time written in details (for example "Owner is free from 3 pm instead"). Never ask the owner to hold: you check with the tenant after this call and call back. Do not transfer or bridge the call.',
   };
 }
