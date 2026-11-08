@@ -4,6 +4,7 @@ import { j, normPhone, parseSpokenTime, normOutcome, parseAmounts, parseRentGoal
 import { getMemory, recordProperty } from './memory.js';
 
 const fmtTime = iso => new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+const fmtDate = d => { const x = new Date(/T/.test(d || '') ? d : `${d}T12:00:00+05:30`); return isNaN(x) ? String(d || 'soon') : x.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long' }); };
 const inr = n => '₹' + Number(n).toLocaleString('en-IN');
 
 export async function getProfile(env, phone) {
@@ -183,7 +184,7 @@ export async function startOwnerDiscussion(env, { phone, listing_id, purpose, of
   if (purpose === 'signing_intent' && !move_in_date) return { error: 'Ask the tenant for their preferred move-in date before informing the owner.' };
   const place = `${listing.bhk ? listing.bhk + ' BHK ' : ''}${listing.title || 'property'} in ${listing.locality || 'Bengaluru'}`;
   const intro = { role: 'You are an AI assistant calling the property owner on behalf of a prospective tenant.',
-    spoken_intro: `Hello${visit.owner_name ? ' ' + visit.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of the prospective tenant about your ${place}.` };
+    spoken_intro: `Hello${visit.owner_name ? ' ' + visit.owner_name : ''}, I am the MergeConflicts rental assistant calling on behalf of the prospective tenant about your ${place}. ${purpose === 'negotiation' ? 'They liked the flat after the viewing and would like to discuss the rent and deposit with you. Is now a good time?' : `They would like to go ahead and rent it, moving in around ${fmtDate(move_in_date)}, and I would like to check the next steps with you. Is now a good time?`}` };
   const common = { listed_terms: { rent: listing.rent ?? null, deposit: listing.deposit ?? null, maintenance: listing.maintenance ?? null }, listing: { id: listing.id, title: listing.title, locality: listing.locality }, visit_id: visit.id };
   let briefing;
   if (purpose === 'negotiation') {
@@ -282,6 +283,16 @@ export function callbackDestination(env, phone) {
   return env.CALLBACK_RING_NUMBER && redirect && phone !== env.CALLBACK_RING_NUMBER ? env.CALLBACK_RING_NUMBER : phone;
 }
 
+// The callback's reason, as the first thing the tenant hears: "Negotiation result for X: the owner agreed ..."
+// becomes "The owner agreed ...". Agent-only instructions ("Tell the tenant exactly this", "ask the tenant ...") are dropped.
+export function spokenPurpose(purpose) {
+  let t = String(purpose || '').replace(/^[^:]{0,80}:\s*/, '');
+  t = t.split(/\.\s*Tell the tenant|;\s*ask the tenant|\.\s*Ask the tenant|Owner's words:/i)[0].replace(/\.+\s*$/, '');
+  t = t.replace(/₹([\d,]+)/g, (_, n) => `${n} rupees`).trim();
+  if (!t) return '';
+  return `${t.charAt(0).toUpperCase()}${t.slice(1)}.`.slice(0, 320);
+}
+
 export async function callTenant(env, { phone, purpose, details = {}, visit_id = null, alert_id = null }) {
   const prof = await getProfile(env, phone);
   const memory = await getMemory(env, phone);
@@ -290,7 +301,7 @@ export async function callTenant(env, { phone, purpose, details = {}, visit_id =
     briefing: {
       role: 'You are calling the TENANT (your client) back. This is a two-way conversation, not an announcement.',
       purpose, ...details, tenant_profile: prof, memory,
-      spoken_intro: `Hi${prof?.name ? ' ' + prof.name : ''}, this is your rental assistant calling with an update.`,
+      spoken_intro: `Hi${prof?.name ? ' ' + prof.name : ''}, this is your MergeConflicts rental assistant calling with an update. ${spokenPurpose(purpose)}`,
       you_can: ['Describe the listings or update and answer questions', 'tenant action=wishlist_add', 'visits action=schedule (ask preferred time and ai_call vs direct_connect) or accept_owner_time', 'tenant action=save_preferences if preferences changed', 'research action=locality / negotiate on request', 'tenant action=alert_cancel if they want no more calls'],
       when_done: 'Call call_context action=complete with a short summary.',
     },
