@@ -116,3 +116,44 @@ Owner negotiation (and signing) calls can run on an ElevenLabs agent instead of 
 ElevenLabs (free tier, ~10k characters a month: only a few test calls): agent `MergeConflicts Negotiator` (id in Worker secret `ELEVENLABS_AGENT_ID`), Claude Sonnet 4.6, voice Anvi (Indian English), eleven_flash_v2, ulaw_8000 in and out, signed sessions only. MCP server `MergeConflicts Rentals` (streamable HTTP, auto-approve, token stored as ElevenLabs workspace secret). Prompt: `talkdesk/elevenlabs_negotiator_prompt.txt`. The agent negotiates freely and records one result with `owner_response final=true`; the Worker still refuses any agreement above the tenant's maximum.
 
 To switch on: create Studio flow (copy of the owner AI flow) whose AI step is replaced by Connect to Autopilot Voice as above, publish it, and set Worker secret `TD_FLOW_OWNER_VOICE` to its flow id (`flowFor` in notify.js sends negotiation and signing_intent owner calls there; viewings stay on the Talkdesk agent). Not yet verified: whether External Voice Stream works on an API-started outbound flow (Talkdesk documents it for inbound calls). Verified: a simulated Talkdesk stream against the deployed bridge received the agent's spoken greeting (`test_voice.mjs` covers lookup, variables, final guard and routing).
+
+
+## Codex task: finish the ElevenLabs voice setup (use computer use for Talkdesk)
+Goal: owner negotiation calls (purpose `negotiation` / `signing_intent`) are spoken by the ElevenLabs agent through the deployed bridge. Everything on the Worker and ElevenLabs side is done (see the section above); what is missing is one Talkdesk Studio flow and one Worker secret.
+
+### Ground rules (shared Talkdesk tenant)
+- Suffix every new resource with `MergeConflicts`. Never edit, delete or publish other teams' flows, numbers, agents or users. Do not change `Owner_AI_Call_MergeConflicts` itself: copy it.
+- The user signs in. Never type passwords. If a sign-in page appears, stop and ask the user.
+- Never commit secrets or phone numbers. `.env`, `.mcp-token` and `.voice-token` are gitignored; keep them that way.
+- Do not place real calls yourself. The live test is the user's (they act as the owner on their own phone).
+- In Git Bash, prefix commands that pass `/v1/...` style paths with `MSYS_NO_PATHCONV=1`, otherwise paths are rewritten into Windows paths.
+
+### Steps
+1. **Studio flow.** In Talkdesk Studio open `Owner_AI_Call_MergeConflicts` (API-triggered outbound flow: Start (API request) -> outbound call to `to_number`, 45 s ring -> AI agent step -> End). Duplicate it as `Owner_Voice_Call_MergeConflicts`. If Studio has no duplicate action, build the same flow by hand with the same input variables (`to_number`, `tenant_number`, `owner_number`, `outreach_id`, `intro`) and the same outbound call settings.
+2. In the copy, delete the AI agent step and put **Connect to Autopilot Voice** in its place (on the "answered / OK" exit of the outbound call step):
+   - Option: **External Voice Stream**.
+   - Voice stream endpoint: `wss://mergeconflicts-rentals-mcp.kelgis.workers.dev/voice/talkdesk`
+   - Custom HTTP header: name `x-mc-voice-token`, value = the contents of `rental-worker/.voice-token` (read the file locally; do not paste it anywhere else). If the component offers no custom headers, append `?token=<value>` to the endpoint URL instead (the Worker accepts either).
+   - Exits **OK**, **Execution Error** and **Escalation** -> End. (No live agent escalation in this demo.)
+3. Validate and **publish** the flow. Open its **Request details** and copy the **API flow ID** (the API trigger ID). It is NOT the ID in the editor URL: for the existing owner flow the API ID is `760925b281b2473c9f49cb9bbddeee97` while the editor ID is `aea8e7e4a910451b99c5ac2b74e141d3`.
+4. **Worker secret.** From `rental-worker/`:
+   ```
+   npx wrangler secret put TD_FLOW_OWNER_VOICE
+   ```
+   and paste the API flow ID. No redeploy is needed for secrets, but confirm with `npx wrangler secret list` that `TD_FLOW_OWNER_VOICE` exists. Viewings keep using `TD_FLOW_OWNER_AI`; only negotiation and signing owner calls use the new flow (`flowFor` in `src/notify.js`).
+5. **Bridge self-test (no phone call, uses a few ElevenLabs characters).** From `rental-worker/`: `node tools/fake_talkdesk_stream.mjs`. Expected output: `media_frames` > 0 and `audio_seconds` around 3-5. Run `npx wrangler tail mergeconflicts-rentals-mcp --format pretty` in another terminal first; lines with `"voice"` show `start`, `agent ready` (formats `ulaw_8000`), the agent's greeting and `end`.
+6. **Hand over to the user for the live test.** Tell them: call the concierge (+1 272-269-3171) from the Talkdesk app, ask to negotiate the Whitefield 3 BHK viewing they have (goal and maximum), hang up, and answer the owner call on their mobile. While they do, keep `wrangler tail` running and check:
+   - `voice start` shows the right `outreach` id with kind `owner_ai` (if it shows no outreach, the interaction id did not match and the fallback found nothing: check `outreach` rows with `status IN ('dialing','in_progress')`).
+   - `agent` / `caller` transcript lines appear and the MCP `tools/call` lines show `research`, `owner_response` with `final: true`.
+   - After the owner hangs up: `voice end` with `why: caller hung up` or `agent finished`, and the tenant callback (outreach kind `tenant_ai`) is dispatched within about a minute.
+   - Full transcript: `npx wrangler d1 execute mergeconflicts-rentals-demo --remote --command "SELECT outreach_id, transcript FROM voice_transcripts ORDER BY id DESC LIMIT 1"`.
+
+### If something fails
+- **Call connects but silence / Execution Error exit:** External Voice Stream may not be supported on API-started outbound flows (Talkdesk documents it for inbound). Check `wrangler tail` for a `voice start` line. If none arrives, the stream never reached the Worker: confirm the endpoint and header, and look at the Studio execution log. Report to the user rather than reworking the architecture.
+- **`voice: no signed url`:** the ElevenLabs key or agent id secret is wrong, or the free quota is used up. Check with `GET https://api.elevenlabs.io/v1/user/subscription` (header `xi-api-key` from `.env` `ELEVEN_LABS_API_KEY`). Free tier is about 10,000 characters a month, enough for only 3-4 negotiation calls; tell the user if it is exhausted.
+- **Agent speaks but never uses tools:** confirm the MCP server `MergeConflicts Rentals` is attached (`GET /v1/convai/agents/<ELEVENLABS_AGENT_ID>`, field `conversation_config.agent.prompt.mcp_server_ids`) and that `GET /v1/convai/mcp-servers/mKgvZ9v626bdOlefCOPc/tools` lists the Worker tools.
+- **Garbled or chipmunk audio:** both agent formats must be `ulaw_8000` (`asr.user_input_audio_format`, `tts.agent_output_audio_format`).
+- To change how the agent negotiates, edit `talkdesk/elevenlabs_negotiator_prompt.txt` and PATCH it to the agent (`conversation_config.agent.prompt.prompt`). Keep the English TTS model on `eleven_flash_v2` or a turbo v2 model (ElevenLabs rejects others for English agents).
+
+### Done means
+The new flow is published, `TD_FLOW_OWNER_VOICE` is set, the self-test passes, and HANDOFF.md records the new flow's API ID and the self-test result. Commit and push (`git add HANDOFF.md`; do not add `.voice-token`). The live phone test stays with the user.
